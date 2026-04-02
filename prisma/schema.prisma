@@ -1,0 +1,450 @@
+// ─── Oracle Database Schema ───
+// PostgreSQL via Railway, managed by Prisma ORM
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ════════════════════════════════════════════
+// USERS & AUTH
+// ════════════════════════════════════════════
+
+enum AuthProvider {
+  EMAIL
+  GOOGLE
+  APPLE
+}
+
+enum UserRole {
+  USER
+  PREMIUM
+  ADMIN
+}
+
+model User {
+  id            String       @id @default(uuid())
+  email         String       @unique
+  passwordHash  String?      // null for SSO-only users
+  firstName     String?
+  lastName      String?
+  avatarUrl     String?
+  role          UserRole     @default(USER)
+  authProvider  AuthProvider  @default(EMAIL)
+  providerId    String?      // external provider user id
+  emailVerified Boolean      @default(false)
+  isActive      Boolean      @default(true)
+
+  // Preferences
+  preferredSports  Sport[]   @default([FOOTBALL])
+  timezone         String    @default("UTC")
+
+  // Tokens
+  refreshToken     String?
+
+  // Relations
+  builderSelections BuilderSelection[]
+  activityLogs      UserActivityLog[]
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([email])
+  @@index([authProvider, providerId])
+  @@map("users")
+}
+
+model UserActivityLog {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    String   // e.g. "view_event", "add_to_builder", "export_selections"
+  metadata  Json?    // flexible payload for action-specific data
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@map("user_activity_logs")
+}
+
+// ════════════════════════════════════════════
+// SPORTS, LEAGUES, TEAMS
+// ════════════════════════════════════════════
+
+enum Sport {
+  FOOTBALL
+  BASKETBALL
+  TENNIS
+  CRICKET
+  BASEBALL
+  HOCKEY
+}
+
+model League {
+  id              String   @id @default(uuid())
+  externalId      String   @unique  // API-Football league id
+  name            String
+  country         String?
+  countryCode     String?
+  sport           Sport    @default(FOOTBALL)
+  season          Int      // e.g. 2025
+  logoUrl         String?
+  isActive        Boolean  @default(true)
+
+  events          Event[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([sport, isActive])
+  @@index([externalId])
+  @@map("leagues")
+}
+
+model Team {
+  id              String   @id @default(uuid())
+  externalId      String   @unique  // API-Football team id
+  name            String
+  shortName       String?
+  logoUrl         String?
+  country         String?
+  sport           Sport    @default(FOOTBALL)
+  venueCity       String?
+  venueName       String?
+
+  // Relations
+  homeEvents      Event[]  @relation("HomeTeam")
+  awayEvents      Event[]  @relation("AwayTeam")
+  players         Player[]
+  matchStats      MatchStats[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([externalId])
+  @@index([sport])
+  @@map("teams")
+}
+
+model Player {
+  id              String   @id @default(uuid())
+  externalId      String   @unique
+  name            String
+  position        String?  // GK, DEF, MID, FWD
+  number          Int?
+  photoUrl        String?
+  teamId          String
+  team            Team     @relation(fields: [teamId], references: [id])
+  isActive        Boolean  @default(true)
+
+  injuries        PlayerInjury[]
+  lineupEntries   LineupEntry[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([teamId])
+  @@index([externalId])
+  @@map("players")
+}
+
+// ════════════════════════════════════════════
+// EVENTS (MATCHES / FIXTURES)
+// ════════════════════════════════════════════
+
+enum EventStatus {
+  SCHEDULED     // fixture confirmed, not started
+  LINEUP_CONFIRMED // lineups announced
+  LIVE          // match in progress
+  HALF_TIME     // half-time break
+  FINISHED      // full time
+  POSTPONED     // postponed
+  CANCELLED     // cancelled
+  SUSPENDED     // suspended during play
+}
+
+model Event {
+  id              String       @id @default(uuid())
+  externalId      String       @unique  // API-Football fixture id
+  leagueId        String
+  league          League       @relation(fields: [leagueId], references: [id])
+  homeTeamId      String
+  homeTeam        Team         @relation("HomeTeam", fields: [homeTeamId], references: [id])
+  awayTeamId      String
+  awayTeam        Team         @relation("AwayTeam", fields: [awayTeamId], references: [id])
+  sport           Sport        @default(FOOTBALL)
+  status          EventStatus  @default(SCHEDULED)
+  kickoffAt       DateTime
+  venue           String?
+  round           String?      // e.g. "Regular Season - 15"
+
+  // Scores (updated live)
+  homeScore       Int?
+  awayScore       Int?
+  htHomeScore     Int?        // half-time
+  htAwayScore     Int?
+  ftHomeScore     Int?        // full-time
+  ftAwayScore     Int?
+
+  // Relations
+  matchStats      MatchStats[]
+  markets         Market[]
+  picks           Pick[]
+  lineups         Lineup[]
+  odds            BookmakerOdds[]
+
+  // Timestamps
+  lineupsConfirmedAt DateTime?
+  lastDataSync       DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([kickoffAt])
+  @@index([sport, kickoffAt])
+  @@index([status, kickoffAt])
+  @@index([leagueId, kickoffAt])
+  @@index([homeTeamId])
+  @@index([awayTeamId])
+  @@index([externalId])
+  @@map("events")
+}
+
+// ════════════════════════════════════════════
+// MATCH STATISTICS (Historical Data)
+// ════════════════════════════════════════════
+
+model MatchStats {
+  id              String   @id @default(uuid())
+  eventId         String
+  event           Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  teamId          String
+  team            Team     @relation(fields: [teamId], references: [id])
+
+  // Core stats
+  goals           Int      @default(0)
+  shotsTotal      Int?
+  shotsOnTarget   Int?
+  possession      Float?   // percentage 0-100
+  corners         Int      @default(0)
+  yellowCards     Int      @default(0)
+  redCards        Int      @default(0)
+  fouls           Int?
+  offsides        Int?
+  saves           Int?
+
+  // Advanced
+  expectedGoals   Float?   // xG if available
+  passAccuracy    Float?   // percentage
+  totalPasses     Int?
+
+  createdAt       DateTime @default(now())
+
+  @@unique([eventId, teamId])
+  @@index([teamId, createdAt])
+  @@index([eventId])
+  @@map("match_stats")
+}
+
+// ════════════════════════════════════════════
+// LINEUPS & INJURIES
+// ════════════════════════════════════════════
+
+model Lineup {
+  id              String        @id @default(uuid())
+  eventId         String
+  event           Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  teamId          String
+  formation       String?       // e.g. "4-3-3"
+  isConfirmed     Boolean       @default(false)
+
+  entries         LineupEntry[]
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@unique([eventId, teamId])
+  @@map("lineups")
+}
+
+model LineupEntry {
+  id              String   @id @default(uuid())
+  lineupId        String
+  lineup          Lineup   @relation(fields: [lineupId], references: [id], onDelete: Cascade)
+  playerId        String
+  player          Player   @relation(fields: [playerId], references: [id])
+  position        String?  // specific position in formation
+  gridPosition    String?  // e.g. "1:4" for formation grid
+  isStarter       Boolean  @default(true)
+
+  @@unique([lineupId, playerId])
+  @@map("lineup_entries")
+}
+
+model PlayerInjury {
+  id              String   @id @default(uuid())
+  playerId        String
+  player          Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  type            String   // e.g. "Hamstring", "Knee", "Suspended"
+  reason          String?
+  status          String   // "Out", "Doubtful", "Day-to-Day"
+  startDate       DateTime?
+  expectedReturn  DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([playerId])
+  @@map("player_injuries")
+}
+
+// ════════════════════════════════════════════
+// BETTING MARKETS & PROBABILITIES
+// ════════════════════════════════════════════
+
+enum MarketCategory {
+  MATCH_RESULT     // 1X2
+  GOALS            // Over/Under, BTTS
+  CORNERS          // Over/Under corners
+  CARDS            // Over/Under cards
+  PLAYER           // Player-specific props
+  HALFTIME         // HT result, HT/FT
+  HANDICAP         // Asian handicap
+  SPECIAL          // Other markets
+}
+
+model Market {
+  id                  String          @id @default(uuid())
+  eventId             String
+  event               Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  category            MarketCategory
+  name                String          // e.g. "Over 2.5 Goals", "BTTS Yes"
+  shortName           String?         // e.g. "O2.5", "BTTS"
+  line                Float?          // e.g. 2.5 for Over 2.5
+
+  // Oracle's computed probability
+  probability         Float           // 0.0 to 1.0
+  confidence          Float           @default(0.5) // 0.0 to 1.0 (how confident in the calc)
+  probabilityUpdatedAt DateTime       @default(now())
+
+  // Value bet detection
+  impliedProbability  Float?          // from bookmaker odds
+  valueGap            Float?          // oracle prob - implied prob
+  isValueBet          Boolean         @default(false)
+
+  // Explanation
+  explanation         String?         @db.Text
+  explanationFactors  Json?           // structured: { stats: [], injuries: [], context: [] }
+
+  // Relations
+  picks               Pick[]
+  builderSelections   BuilderSelection[]
+
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  @@index([eventId, category])
+  @@index([eventId, probability(sort: Desc)])
+  @@index([isValueBet])
+  @@map("markets")
+}
+
+// ════════════════════════════════════════════
+// ORACLE PICKS (Ranked Top Predictions)
+// ════════════════════════════════════════════
+
+model Pick {
+  id              String   @id @default(uuid())
+  eventId         String
+  event           Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  marketId        String
+  market          Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  rank            Int      // 1 = highest probability pick for this event
+  probability     Float    // snapshot at time of pick generation
+  confidence      Float    @default(0.5)
+  explanation     String?  @db.Text  // human-readable summary
+  isActive        Boolean  @default(true)
+
+  // Tracking
+  computedAt      DateTime @default(now())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([eventId, rank])
+  @@index([eventId, isActive])
+  @@index([probability(sort: Desc)])
+  @@map("picks")
+}
+
+// ════════════════════════════════════════════
+// BOOKMAKER ODDS
+// ════════════════════════════════════════════
+
+model BookmakerOdds {
+  id              String   @id @default(uuid())
+  eventId         String
+  event           Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  bookmaker       String   // e.g. "bet365", "william_hill"
+  marketName      String   // e.g. "Over 2.5 Goals"
+  selection       String   // e.g. "Over", "Under", "Home", "Draw", "Away"
+  odds            Float    // decimal odds
+  impliedProb     Float    // 1 / odds
+
+  fetchedAt       DateTime @default(now())
+  createdAt       DateTime @default(now())
+
+  @@index([eventId, marketName])
+  @@index([eventId, bookmaker])
+  @@map("bookmaker_odds")
+}
+
+// ════════════════════════════════════════════
+// BET BUILDER (User Selections)
+// ════════════════════════════════════════════
+
+model BuilderSelection {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  marketId        String
+  market          Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  addedProbability Float   // probability at time of adding to builder
+
+  createdAt       DateTime @default(now())
+
+  @@unique([userId, marketId])
+  @@index([userId])
+  @@map("builder_selections")
+}
+
+// ════════════════════════════════════════════
+// DATA INGESTION TRACKING
+// ════════════════════════════════════════════
+
+enum IngestJobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  PARTIAL
+}
+
+model IngestJob {
+  id              String          @id @default(uuid())
+  provider        String          // "api_football", "odds_api"
+  jobType         String          // "daily_fixtures", "lineup_poll", "odds_refresh", "stats_backfill"
+  status          IngestJobStatus @default(QUEUED)
+  recordsProcessed Int            @default(0)
+  recordsFailed    Int            @default(0)
+  errorMessage    String?         @db.Text
+  metadata        Json?           // job-specific context
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime        @default(now())
+
+  @@index([provider, jobType, createdAt])
+  @@index([status])
+  @@map("ingest_jobs")
+}
