@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
 import { Sport } from '@prisma/client';
+import { toFiniteNumber } from '@/common/utils/coerce';
 
 @Injectable()
 export class PicksService {
@@ -51,12 +52,9 @@ export class PicksService {
     date?: string;
     limit?: number;
   }) {
-    const {
-      sport,
-      minProbability = this.MIN_PROBABILITY,
-      date,
-      limit = 20,
-    } = filters;
+    const { sport, date } = filters;
+    const minProbability = toFiniteNumber(filters.minProbability, this.MIN_PROBABILITY);
+    const limit = toFiniteNumber(filters.limit, 20);
 
     const targetDate = date ? new Date(date) : new Date();
     const startOfDay = new Date(targetDate);

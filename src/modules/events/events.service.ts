@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
+import { toFiniteNumber } from '@/common/utils/coerce';
 import { Sport, EventStatus, Prisma } from '@prisma/client';
 import { EventFilterDto } from './dto/event-filter.dto';
 
@@ -176,7 +177,8 @@ export class EventsService {
    * Get upcoming events across all sports (next 24h).
    * Used for the "What's Coming Up" section.
    */
-  async findUpcoming(sport?: Sport, limit = 20) {
+  async findUpcoming(sport?: Sport, limitInput?: number) {
+    const limit = toFiniteNumber(limitInput, 20);
     const now = new Date();
     const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 

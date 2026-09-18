@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
+import { toFiniteNumber } from '@/common/utils/coerce';
 import { MarketCategory, Prisma } from '@prisma/client';
 
 @Injectable()
@@ -78,7 +79,8 @@ export class MarketsService {
   /**
    * Get all value bets across events for a given date.
    */
-  async findValueBets(date?: string, limit = 20) {
+  async findValueBets(date?: string, limitInput?: number) {
+    const limit = toFiniteNumber(limitInput, 20);
     const targetDate = date ? new Date(date) : new Date();
     const startOfDay = new Date(targetDate);
     startOfDay.setHours(0, 0, 0, 0);
