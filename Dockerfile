@@ -1,6 +1,9 @@
 # ─── Build Stage ───
 FROM node:20-alpine AS builder
 
+# Prisma engines need OpenSSL on Alpine
+RUN apk add --no-cache openssl libc6-compat
+
 WORKDIR /app
 
 COPY package*.json ./
@@ -15,6 +18,9 @@ RUN npm run build
 
 # ─── Production Stage ───
 FROM node:20-alpine AS production
+
+# Prisma engines need OpenSSL on Alpine
+RUN apk add --no-cache openssl libc6-compat
 
 WORKDIR /app
 

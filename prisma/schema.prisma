@@ -2,7 +2,9 @@
 // PostgreSQL via Railway, managed by Prisma ORM
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // linux-musl-openssl-3.0.x: required for the node:20-alpine runtime image
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
