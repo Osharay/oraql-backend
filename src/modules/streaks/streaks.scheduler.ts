@@ -1,0 +1,92 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
+import { ObservationsService } from './observations.service';
+import { BaselinesService } from './baselines.service';
+import { CandidatesService } from './candidates.service';
+import { SnapshotsService } from './snapshots.service';
+
+/**
+ * The engine's daily rhythm.
+ *
+ * Order matters: observations must exist before baselines can be computed
+ * from them, baselines before candidates can be tested against them, and
+ * candidates before snapshots can be captured. Running these out of order
+ * silently produces candidates judged against stale baselines.
+ */
+@Injectable()
+export class StreaksScheduler {
+  private readonly logger = new Logger(StreaksScheduler.name);
+
+  constructor(
+    private readonly observations: ObservationsService,
+    private readonly baselines: BaselinesService,
+    private readonly candidates: CandidatesService,
+    private readonly snapshots: SnapshotsService,
+  ) {}
+
+  /** Keep the database registry in step with the code registry. */
+  async onModuleInit() {
+    try {
+      await this.observations.syncRegistry();
+    } catch (error) {
+      this.logger.error(
+        `Market registry sync failed on boot: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+
+  /**
+   * Full engine cycle, after the 04:00 fixture ingest has landed.
+   */
+  @Cron('30 5 * * *', { name: 'streak-engine-cycle', timeZone: 'UTC' })
+  async dailyCycle() {
+    this.logger.log('Streak engine cycle starting');
+
+    try {
+      const derived = await this.observations.deriveForFinishedEvents(500);
+      const baselines = await this.baselines.computeAll();
+      const run = await this.candidates.runEngine();
+      const captured = await this.snapshots.captureForUpcoming();
+
+      this.logger.log(
+        `Cycle complete — observations: ${derived.observations}, baselines: ${baselines.written}, ` +
+          `tested: ${run.tested}, survived: ${run.surviving}, snapshots: ${captured.captured}`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Streak engine cycle failed: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+
+  /**
+   * Capture hourly so events entering the 48h window are snapshotted while
+   * there is still time before their cutoff.
+   */
+  @Cron('0 * * * *', { name: 'streak-snapshot-capture', timeZone: 'UTC' })
+  async capture() {
+    try {
+      await this.snapshots.captureForUpcoming();
+    } catch (error) {
+      this.logger.error(
+        `Snapshot capture failed: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+
+  /**
+   * Settle shortly after matches finish: derive the observations first, since
+   * settlement reads them.
+   */
+  @Cron('*/30 * * * *', { name: 'streak-settlement', timeZone: 'UTC' })
+  async settle() {
+    try {
+      await this.observations.deriveForFinishedEvents(200);
+      await this.snapshots.settleFinished();
+    } catch (error) {
+      this.logger.error(
+        `Settlement failed: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+}

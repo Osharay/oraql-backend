@@ -6,6 +6,8 @@ import { UserRole } from '@prisma/client';
 import { ObservationsService } from './observations.service';
 import { BaselinesService } from './baselines.service';
 import { CandidatesService } from './candidates.service';
+import { SnapshotsService } from './snapshots.service';
+import { PerformanceService } from './performance.service';
 
 @ApiTags('streaks')
 @ApiBearerAuth()
@@ -16,6 +18,8 @@ export class StreaksController {
     private readonly observations: ObservationsService,
     private readonly baselines: BaselinesService,
     private readonly candidates: CandidatesService,
+    private readonly snapshots: SnapshotsService,
+    private readonly performance: PerformanceService,
   ) {}
 
   private assertAdmin(user: { role?: UserRole }) {
@@ -66,6 +70,38 @@ export class StreaksController {
     return this.candidates.getLatestSurvivors(
       Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 200) : 50,
     );
+  }
+
+  @Post('snapshots/capture')
+  @ApiOperation({ summary: 'Capture pre-kickoff snapshots for upcoming events' })
+  async capture(@CurrentUser() user: { role?: UserRole }) {
+    this.assertAdmin(user);
+    return this.snapshots.captureForUpcoming();
+  }
+
+  @Post('snapshots/settle')
+  @ApiOperation({ summary: 'Settle snapshots whose events have finished' })
+  async settle(@CurrentUser() user: { role?: UserRole }) {
+    this.assertAdmin(user);
+    return this.snapshots.settleFinished();
+  }
+
+  @Get('performance')
+  @ApiOperation({ summary: "A day's realised lift against expected" })
+  async performance_(@Query('date') date?: string, @Query('all') all?: string) {
+    return this.performance.dailyReport(date, all !== 'true');
+  }
+
+  @Get('spoilers')
+  @ApiOperation({ summary: 'Streaks that broke, longest run first' })
+  async spoilers(@Query('date') date?: string) {
+    return this.performance.spoilers(date);
+  }
+
+  @Get('strength-bands')
+  @ApiOperation({ summary: 'Does strength score actually predict realised lift?' })
+  async strengthBands() {
+    return this.performance.strengthBands();
   }
 
   @Get('baselines')
