@@ -1,6 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
 import { ObservationResult, StreakStatus } from '@prisma/client';
+import {
+  combinedProbability,
+  pickDiverseComponents,
+  MIN_CLUSTER_SIZE,
+  type Selectable,
+} from './cluster-selection';
 
 /**
  * Cluster assembly.
@@ -71,29 +77,38 @@ export class ClustersService {
     });
 
     const used = new Set<string>();
-    const clusters: Array<typeof snapshots> = [];
+    const clusters: Selectable[][] = [];
+
+    // Flatten to the shape the selection rules work on.
+    const pool = snapshots.map((s) => ({
+      id: s.id,
+      eventId: s.eventId,
+      leagueId: s.event.leagueId,
+      marketDefinitionId: s.streakCandidate.marketDefinitionId,
+      hitRate: s.hitRate,
+      strengthScore: s.strengthScore,
+    }));
 
     for (let i = 0; i < count; i++) {
-      const picked = this.pickDiverseSet(snapshots, used, size, requireDistinctLeague);
-      if (picked.length < 2) break; // a cluster of one is just a streak
-      picked.forEach((s) => used.add(s.id));
+      const picked = pickDiverseComponents(pool, {
+        size,
+        requireDistinctLeague,
+        used,
+      });
+      if (picked.length < MIN_CLUSTER_SIZE) break;
+      picked.forEach((p) => used.add(p.id));
       clusters.push(picked);
     }
 
     let created = 0;
 
     for (const components of clusters) {
-      // Product of component hit rates. An independence approximation, and
-      // labelled as one: same-day football correlates through weather,
-      // refereeing and league-wide scoring trends.
-      const combinedProbability = components.reduce((p, c) => p * c.hitRate, 1);
-
       const cluster = await this.prisma.cluster.create({
         data: {
           date: start,
           type: 'DAILY_STRONGEST',
           componentCount: components.length,
-          combinedProbability,
+          combinedProbability: combinedProbability(components),
           status: StreakStatus.NEW,
         },
       });
@@ -123,38 +138,6 @@ export class ClustersService {
     };
   }
 
-  /**
-   * Greedy selection: strongest first, skipping anything that repeats an event
-   * or a market already in the set.
-   */
-  private pickDiverseSet<
-    T extends {
-      id: string;
-      eventId: string;
-      event: { leagueId: string };
-      streakCandidate: { marketDefinitionId: string };
-    },
-  >(pool: T[], used: Set<string>, size: number, requireDistinctLeague: boolean): T[] {
-    const chosen: T[] = [];
-    const events = new Set<string>();
-    const markets = new Set<string>();
-    const leagues = new Set<string>();
-
-    for (const s of pool) {
-      if (chosen.length >= size) break;
-      if (used.has(s.id)) continue;
-      if (events.has(s.eventId)) continue;
-      if (markets.has(s.streakCandidate.marketDefinitionId)) continue;
-      if (requireDistinctLeague && leagues.has(s.event.leagueId)) continue;
-
-      chosen.push(s);
-      events.add(s.eventId);
-      markets.add(s.streakCandidate.marketDefinitionId);
-      leagues.add(s.event.leagueId);
-    }
-
-    return chosen;
-  }
 
   /** Clusters for a date, with their components and results when settled. */
   async listForDate(date?: string) {
