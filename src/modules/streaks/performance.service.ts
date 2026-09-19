@@ -125,6 +125,60 @@ export class PerformanceService {
   }
 
   /**
+   * Realised lift by sample size — the empirical answer to "how much history
+   * is actually needed?".
+   *
+   * Rather than arguing about whether 10 matches is enough, this lets settled
+   * results say so: if slices built on 20 observations show no realised lift
+   * while slices built on 100 do, the floor is doing its job. If the small
+   * ones perform just as well, the floor is too strict and can come down.
+   */
+  async sampleSizeBands() {
+    const settled = await this.prisma.snapshotResult.findMany({
+      where: { result: { in: [ObservationResult.WIN, ObservationResult.LOSS] } },
+      select: {
+        realisedLift: true,
+        result: true,
+        snapshot: { select: { sampleSize: true } },
+      },
+    });
+
+    const bands = [
+      { label: 'under 25', min: 0, max: 25 },
+      { label: '25-49', min: 25, max: 50 },
+      { label: '50-99', min: 50, max: 100 },
+      { label: '100-199', min: 100, max: 200 },
+      { label: '200+', min: 200, max: Number.MAX_SAFE_INTEGER },
+    ];
+
+    const rows = bands.map((b) => {
+      const inBand = settled.filter(
+        (s) => s.snapshot.sampleSize >= b.min && s.snapshot.sampleSize < b.max,
+      );
+      const wins = inBand.filter((s) => s.result === ObservationResult.WIN).length;
+
+      return {
+        band: b.label,
+        settled: inBand.length,
+        wins,
+        hitRate: inBand.length ? wins / inBand.length : null,
+        meanRealisedLift: inBand.length
+          ? inBand.reduce((sum, s) => sum + (s.realisedLift ?? 0), 0) / inBand.length
+          : null,
+      };
+    });
+
+    return {
+      totalSettled: settled.length,
+      note:
+        settled.length < 200
+          ? `Only ${settled.length} settled snapshots. These bands cannot answer the sample-size question yet; a few hundred per band is the point at which they start to.`
+          : 'Compare mean realised lift across bands. If the small-sample bands hold up, the floor can come down; if they do not, it is earning its place.',
+      bands: rows,
+    };
+  }
+
+  /**
    * Strength band versus realised lift — the analysis that decides whether the
    * scoring model is worth keeping.
    *

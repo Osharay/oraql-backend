@@ -114,7 +114,7 @@ export class CandidatesService {
       const [definitions, baselines, teams] = await Promise.all([
         this.prisma.marketDefinition.findMany({
           where: { isActive: true },
-          select: { id: true, marketId: true, selections: true },
+          select: { id: true, marketId: true, selections: true, minSample: true },
         }),
         this.prisma.marketBaseline.findMany({
           select: {
@@ -126,6 +126,13 @@ export class CandidatesService {
         }),
         this.prisma.team.findMany({ select: { id: true } }),
       ]);
+
+      // Per-market floors override the engine default: what counts as enough
+      // evidence depends on the market's own base rate and volatility.
+      const floorByMarket = new Map<string, number>();
+      for (const d of definitions) {
+        if (d.minSample != null) floorByMarket.set(d.id, d.minSample);
+      }
 
       const baselineMap = new Map<string, number>();
       for (const b of baselines) {
@@ -145,6 +152,7 @@ export class CandidatesService {
         for (const [marketDefinitionId, rows] of rowsByKey) {
           // Fixture-level markets have no side to resolve; team markets do,
           // and testing them whole is what keeps the sample usable.
+          const floor = floorByMarket.get(marketDefinitionId) ?? minSample;
           const isFixtureLevel = rows[0]?.selection === ObservationSelection.MATCH;
           const combinedSelection = isFixtureLevel ? ObservationSelection.MATCH : null;
 
@@ -155,12 +163,12 @@ export class CandidatesService {
             'ALL',
             rows,
             baselineMap,
-            minSample,
+            floor,
           );
           if (combined) tested.push(combined);
 
           // Only spend the split where the record can carry it.
-          if (!splitByVenue || rows.length < splitFloor) continue;
+          if (!splitByVenue || rows.length < floor * this.VENUE_SPLIT_MULTIPLE) continue;
 
           for (const venue of ['HOME', 'AWAY'] as const) {
             const subset = rows.filter((r) => r.isHome === (venue === 'HOME'));
@@ -177,7 +185,7 @@ export class CandidatesService {
               venue,
               subset,
               baselineMap,
-              minSample,
+              floor,
             );
             if (candidate) tested.push(candidate);
           }
@@ -415,6 +423,40 @@ export class CandidatesService {
   private last10Rate(last10: string): number {
     if (!last10.length) return 0;
     return [...last10].filter((c) => c === 'W').length / last10.length;
+  }
+
+  /**
+   * Candidates that did not clear the gate but are still leaning the right
+   * way, ranked by lift.
+   *
+   * Kept separate and labelled: these have NOT been shown to differ from their
+   * baseline, and the engine says so rather than hiding them or promoting them.
+   */
+  async getLatestSuggestive(limit = 50) {
+    const run = await this.prisma.engineRun.findFirst({
+      where: { completedAt: { not: null } },
+      orderBy: { startedAt: 'desc' },
+      select: { id: true, candidatesTested: true },
+    });
+
+    if (!run) return { run: null, tier: 'suggestive', candidates: [] };
+
+    const candidates = await this.prisma.streakCandidate.findMany({
+      where: { engineRunId: run.id, survivedGate: false, lift: { gt: 0 } },
+      include: {
+        marketDefinition: { select: { marketId: true, displayName: true, shortName: true } },
+      },
+      orderBy: { lift: 'desc' },
+      take: limit,
+    });
+
+    return {
+      run,
+      tier: 'suggestive',
+      caveat:
+        'Not distinguishable from baseline after correcting for the number of slices tested. Ranked by lift only — treat as exploratory, not as evidence.',
+      candidates,
+    };
   }
 
   /** Survivors of the most recent completed run, strongest first. */

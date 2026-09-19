@@ -64,12 +64,16 @@ export class StreaksController {
   }
 
   @Get('candidates')
-  @ApiOperation({ summary: "Survivors of the latest engine run, strongest first" })
-  async listCandidates(@Query('limit') limit?: string) {
+  @ApiOperation({
+    summary: 'Latest run. tier=significant (default) cleared the gate; tier=suggestive did not',
+  })
+  async listCandidates(@Query('limit') limit?: string, @Query('tier') tier?: string) {
     const parsed = Number(limit);
-    return this.candidates.getLatestSurvivors(
-      Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 200) : 50,
-    );
+    const take = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 200) : 50;
+
+    return tier === 'suggestive'
+      ? this.candidates.getLatestSuggestive(take)
+      : this.candidates.getLatestSurvivors(take);
   }
 
   @Post('snapshots/capture')
@@ -102,6 +106,12 @@ export class StreaksController {
   @ApiOperation({ summary: 'Does strength score actually predict realised lift?' })
   async strengthBands() {
     return this.performance.strengthBands();
+  }
+
+  @Get('sample-size-bands')
+  @ApiOperation({ summary: 'Does more history actually produce more realised lift?' })
+  async sampleSizeBands() {
+    return this.performance.sampleSizeBands();
   }
 
   @Get('baselines')

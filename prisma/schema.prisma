@@ -519,6 +519,10 @@ model MarketDefinition {
   selections    ObservationSelection[]
   /// Stat fields the evaluator needs; missing ones produce UNKNOWN.
   requires      String[]
+  /// Per-market override of the sample floor. Null uses the engine default.
+  /// Markets differ in base rate and volatility, so the evidence needed to
+  /// distinguish one from its baseline differs too.
+  minSample     Int?
   isActive      Boolean        @default(true)
   notes         String?
 
