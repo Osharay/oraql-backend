@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ObservationsService } from './observations.service';
 import { BaselinesService } from './baselines.service';
+import { CandidatesService } from './candidates.service';
 import { StreaksController } from './streaks.controller';
 
 /**
@@ -9,7 +10,7 @@ import { StreaksController } from './streaks.controller';
  */
 @Module({
   controllers: [StreaksController],
-  providers: [ObservationsService, BaselinesService],
-  exports: [ObservationsService, BaselinesService],
+  providers: [ObservationsService, BaselinesService, CandidatesService],
+  exports: [ObservationsService, BaselinesService, CandidatesService],
 })
 export class StreaksModule {}

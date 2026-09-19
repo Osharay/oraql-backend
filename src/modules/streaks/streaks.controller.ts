@@ -5,6 +5,7 @@ import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { UserRole } from '@prisma/client';
 import { ObservationsService } from './observations.service';
 import { BaselinesService } from './baselines.service';
+import { CandidatesService } from './candidates.service';
 
 @ApiTags('streaks')
 @ApiBearerAuth()
@@ -14,6 +15,7 @@ export class StreaksController {
   constructor(
     private readonly observations: ObservationsService,
     private readonly baselines: BaselinesService,
+    private readonly candidates: CandidatesService,
   ) {}
 
   private assertAdmin(user: { role?: UserRole }) {
@@ -48,6 +50,22 @@ export class StreaksController {
   async computeBaselines(@CurrentUser() user: { role?: UserRole }) {
     this.assertAdmin(user);
     return this.baselines.computeAll();
+  }
+
+  @Post('engine/run')
+  @ApiOperation({ summary: 'Test every slice, correct for multiple comparisons, store candidates' })
+  async runEngine(@CurrentUser() user: { role?: UserRole }) {
+    this.assertAdmin(user);
+    return this.candidates.runEngine();
+  }
+
+  @Get('candidates')
+  @ApiOperation({ summary: "Survivors of the latest engine run, strongest first" })
+  async listCandidates(@Query('limit') limit?: string) {
+    const parsed = Number(limit);
+    return this.candidates.getLatestSurvivors(
+      Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 200) : 50,
+    );
   }
 
   @Get('baselines')
