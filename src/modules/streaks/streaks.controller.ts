@@ -1,14 +1,17 @@
-import { Controller, Post, Get, ForbiddenException, UseGuards, Query } from '@nestjs/common';
+import { Controller, Post, Get, UseGuards, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@/modules/auth/guards/jwt-auth.guard';
-import { CurrentUser } from '@/common/decorators/current-user.decorator';
-import { UserRole } from '@prisma/client';
+import { AdminGuard } from '@/common/guards/admin.guard';
 import { ObservationsService } from './observations.service';
 import { BaselinesService } from './baselines.service';
 import { CandidatesService } from './candidates.service';
 import { SnapshotsService } from './snapshots.service';
 import { PerformanceService } from './performance.service';
 
+/**
+ * Reads are open to any signed-in user — they are the product. Writes spend
+ * API quota and rewrite shared state, so those carry AdminGuard individually.
+ */
 @ApiTags('streaks')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
@@ -22,27 +25,19 @@ export class StreaksController {
     private readonly performance: PerformanceService,
   ) {}
 
-  private assertAdmin(user: { role?: UserRole }) {
-    if (user?.role !== UserRole.ADMIN) {
-      throw new ForbiddenException('Admin role required');
-    }
-  }
 
   @Post('registry/sync')
+  @UseGuards(AdminGuard)
   @ApiOperation({ summary: 'Push the code market registry into the database' })
-  async syncRegistry(@CurrentUser() user: { role?: UserRole }) {
-    this.assertAdmin(user);
+  async syncRegistry() {
     const count = await this.observations.syncRegistry();
     return { definitions: count };
   }
 
   @Post('observations/derive')
+  @UseGuards(AdminGuard)
   @ApiOperation({ summary: 'Derive observations for finished events that have none' })
-  async derive(
-    @CurrentUser() user: { role?: UserRole },
-    @Query('limit') limit?: string,
-  ) {
-    this.assertAdmin(user);
+  async derive(@Query('limit') limit?: string) {
     const parsed = Number(limit);
     return this.observations.deriveForFinishedEvents(
       Number.isFinite(parsed) && parsed > 0 ? parsed : 200,
@@ -50,16 +45,16 @@ export class StreaksController {
   }
 
   @Post('baselines/compute')
+  @UseGuards(AdminGuard)
   @ApiOperation({ summary: 'Recompute market baselines from settled observations' })
-  async computeBaselines(@CurrentUser() user: { role?: UserRole }) {
-    this.assertAdmin(user);
+  async computeBaselines() {
     return this.baselines.computeAll();
   }
 
   @Post('engine/run')
+  @UseGuards(AdminGuard)
   @ApiOperation({ summary: 'Test every slice, correct for multiple comparisons, store candidates' })
-  async runEngine(@CurrentUser() user: { role?: UserRole }) {
-    this.assertAdmin(user);
+  async runEngine() {
     return this.candidates.runEngine();
   }
 
@@ -77,16 +72,16 @@ export class StreaksController {
   }
 
   @Post('snapshots/capture')
+  @UseGuards(AdminGuard)
   @ApiOperation({ summary: 'Capture pre-kickoff snapshots for upcoming events' })
-  async capture(@CurrentUser() user: { role?: UserRole }) {
-    this.assertAdmin(user);
+  async capture() {
     return this.snapshots.captureForUpcoming();
   }
 
   @Post('snapshots/settle')
+  @UseGuards(AdminGuard)
   @ApiOperation({ summary: 'Settle snapshots whose events have finished' })
-  async settle(@CurrentUser() user: { role?: UserRole }) {
-    this.assertAdmin(user);
+  async settle() {
     return this.snapshots.settleFinished();
   }
 
@@ -116,8 +111,7 @@ export class StreaksController {
 
   @Get('baselines')
   @ApiOperation({ summary: 'Current baselines, highest sample first' })
-  async listBaselines(@CurrentUser() user: { role?: UserRole }) {
-    this.assertAdmin(user);
+  async listBaselines() {
     return this.baselines.listAll();
   }
 }

@@ -1,16 +1,9 @@
-import {
-  Controller,
-  Post,
-  Body,
-  ForbiddenException,
-  UseGuards,
-} from '@nestjs/common';
+import { Controller, Post, Body, UseGuards } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@/modules/auth/guards/jwt-auth.guard';
-import { CurrentUser } from '@/common/decorators/current-user.decorator';
-import { UserRole } from '@prisma/client';
+import { AdminGuard } from '@/common/guards/admin.guard';
 import { IngestService } from './ingest.service';
 
 /**
@@ -22,7 +15,7 @@ import { IngestService } from './ingest.service';
  */
 @ApiTags('ingest')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, AdminGuard)
 @Controller('ingest')
 export class IngestController {
   constructor(
@@ -30,16 +23,10 @@ export class IngestController {
     @InjectQueue('ingest') private readonly ingestQueue: Queue,
   ) {}
 
-  private assertAdmin(user: { role?: UserRole }) {
-    if (user?.role !== UserRole.ADMIN) {
-      throw new ForbiddenException('Admin role required');
-    }
-  }
 
   @Post('run')
   @ApiOperation({ summary: 'Run the full ingest chain now (fixtures → stats → probabilities)' })
-  async runNow(@CurrentUser() user: { role?: UserRole }) {
-    this.assertAdmin(user);
+  async runNow() {
     const job = await this.ingestQueue.add('daily-fixtures', {}, { attempts: 1 });
     return { queued: 'daily-fixtures', jobId: job.id };
   }
@@ -47,10 +34,8 @@ export class IngestController {
   @Post('stats')
   @ApiOperation({ summary: 'Refresh match history for teams playing soon' })
   async runStats(
-    @CurrentUser() user: { role?: UserRole },
     @Body() body: { maxTeams?: number },
   ) {
-    this.assertAdmin(user);
     const job = await this.ingestQueue.add(
       'team-stats-sweep',
       { maxTeams: body?.maxTeams },
@@ -62,10 +47,8 @@ export class IngestController {
   @Post('backfill')
   @ApiOperation({ summary: 'Backfill league-seasons — one request each, scores only' })
   async backfill(
-    @CurrentUser() user: { role?: UserRole },
     @Body() body: { leagues: string[]; seasons: number[] },
   ) {
-    this.assertAdmin(user);
 
     const leagues = body?.leagues ?? [];
     const seasons = body?.seasons ?? [];
@@ -91,10 +74,8 @@ export class IngestController {
   @Post('backfill/stats')
   @ApiOperation({ summary: 'Backfill per-fixture stats — two requests per fixture, capped' })
   async backfillStats(
-    @CurrentUser() user: { role?: UserRole },
     @Body() body: { leagueExternalId?: string; season?: number; maxRequests?: number },
   ) {
-    this.assertAdmin(user);
     return this.ingestService.backfillMatchStats({
       leagueExternalId: body?.leagueExternalId,
       season: body?.season,
@@ -105,17 +86,14 @@ export class IngestController {
   @Post('backfill/estimate')
   @ApiOperation({ summary: 'What a backfill would cost, without spending anything' })
   async estimate(
-    @CurrentUser() user: { role?: UserRole },
     @Body() body: { leagues: string[]; seasons: number[] },
   ) {
-    this.assertAdmin(user);
     return this.ingestService.estimateBackfill(body?.leagues ?? [], body?.seasons ?? []);
   }
 
   @Post('compute')
   @ApiOperation({ summary: 'Recompute probabilities for events kicking off soon' })
-  async runCompute(@CurrentUser() user: { role?: UserRole }) {
-    this.assertAdmin(user);
+  async runCompute() {
     const events = await this.ingestService.getEventsInWindow(72);
     for (const event of events) {
       await this.ingestQueue.add('compute-probabilities', { eventId: event.id }, { attempts: 1 });
