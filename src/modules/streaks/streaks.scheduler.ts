@@ -4,6 +4,8 @@ import { ObservationsService } from './observations.service';
 import { BaselinesService } from './baselines.service';
 import { CandidatesService } from './candidates.service';
 import { SnapshotsService } from './snapshots.service';
+import { ClustersService } from './clusters.service';
+import { ProfilesService } from './profiles.service';
 
 /**
  * The engine's daily rhythm.
@@ -22,6 +24,8 @@ export class StreaksScheduler {
     private readonly baselines: BaselinesService,
     private readonly candidates: CandidatesService,
     private readonly snapshots: SnapshotsService,
+    private readonly clusters: ClustersService,
+    private readonly profiles: ProfilesService,
   ) {}
 
   /** Keep the database registry in step with the code registry. */
@@ -47,10 +51,14 @@ export class StreaksScheduler {
       const baselines = await this.baselines.computeAll();
       const run = await this.candidates.runEngine();
       const captured = await this.snapshots.captureForUpcoming();
+      // Clusters build from snapshots, so they come after capture.
+      const clusters = await this.clusters.buildForDate({});
+      const profiles = await this.profiles.computeAll();
 
       this.logger.log(
         `Cycle complete — observations: ${derived.observations}, baselines: ${baselines.written}, ` +
-          `tested: ${run.tested}, survived: ${run.surviving}, snapshots: ${captured.captured}`,
+          `tested: ${run.tested}, survived: ${run.surviving}, snapshots: ${captured.captured}, ` +
+          `clusters: ${clusters.created}, profiles: ${profiles.written}`,
       );
     } catch (error) {
       this.logger.error(

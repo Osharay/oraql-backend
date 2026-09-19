@@ -1,4 +1,4 @@
-import { Controller, Post, Get, UseGuards, Query } from '@nestjs/common';
+import { Controller, Post, Get, Body, UseGuards, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@/modules/auth/guards/jwt-auth.guard';
 import { AdminGuard } from '@/common/guards/admin.guard';
@@ -7,6 +7,8 @@ import { BaselinesService } from './baselines.service';
 import { CandidatesService } from './candidates.service';
 import { SnapshotsService } from './snapshots.service';
 import { PerformanceService } from './performance.service';
+import { ClustersService } from './clusters.service';
+import { ProfilesService } from './profiles.service';
 
 /**
  * Reads are open to any signed-in user — they are the product. Writes spend
@@ -23,6 +25,8 @@ export class StreaksController {
     private readonly candidates: CandidatesService,
     private readonly snapshots: SnapshotsService,
     private readonly performance: PerformanceService,
+    private readonly clusters: ClustersService,
+    private readonly profiles: ProfilesService,
   ) {}
 
 
@@ -83,6 +87,42 @@ export class StreaksController {
   @ApiOperation({ summary: 'Settle snapshots whose events have finished' })
   async settle() {
     return this.snapshots.settleFinished();
+  }
+
+  @Post('clusters/build')
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: "Assemble today's clusters from captured snapshots" })
+  async buildClusters(@Body() body?: { date?: string; size?: number; count?: number }) {
+    return this.clusters.buildForDate(body ?? {});
+  }
+
+  @Get('clusters')
+  @ApiOperation({ summary: 'Clusters for a date, with components and results' })
+  async listClusters(@Query('date') date?: string) {
+    return this.clusters.listForDate(date);
+  }
+
+  @Get('clusters/performance')
+  @ApiOperation({ summary: 'Predicted versus actual cluster outcomes' })
+  async clusterPerformance() {
+    return this.clusters.performance();
+  }
+
+  @Post('profiles/compute')
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: 'Derive team-market WATCH / NEUTRAL / CAUTION flags' })
+  async computeProfiles() {
+    return this.profiles.computeAll();
+  }
+
+  @Get('profiles')
+  @ApiOperation({ summary: 'Team-market profiles, highest lift first' })
+  async listProfiles(@Query('flag') flag?: string, @Query('teamId') teamId?: string) {
+    return this.profiles.list({
+      flag: flag as never,
+      teamId,
+      limit: 100,
+    });
   }
 
   @Get('performance')

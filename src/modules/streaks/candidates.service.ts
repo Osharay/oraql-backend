@@ -156,6 +156,11 @@ export class CandidatesService {
         );
       }
 
+      // Previous run, for the status lifecycle. Without it every candidate
+      // reads as ACTIVE and the user cannot tell a pattern that is building
+      // from one that is falling apart.
+      const previous = await this.previousRunCandidates(run.id);
+
       const tested: TestedCandidate[] = [];
       let eventsSeen = 0;
 
@@ -234,7 +239,7 @@ export class CandidatesService {
           longestStreak: c.longestStreak,
           last10: c.last10,
           strengthScore: survivedGate ? this.strengthScore(c) : 0,
-          status: survivedGate ? StreakStatus.ACTIVE : StreakStatus.FILTERED,
+          status: this.statusFor(c, survivedGate, previous),
           survivedGate,
         };
       });
@@ -502,6 +507,80 @@ export class CandidatesService {
         'Not distinguishable from baseline after correcting for the number of slices tested. Ranked by lift only — treat as exploratory, not as evidence.',
       candidates,
     };
+  }
+
+  /**
+   * The previous completed run's candidates, keyed by slice, so this run can
+   * say how each one has moved.
+   */
+  private async previousRunCandidates(currentRunId: string) {
+    const prior = await this.prisma.engineRun.findFirst({
+      where: { completedAt: { not: null }, id: { not: currentRunId } },
+      orderBy: { startedAt: 'desc' },
+      select: { id: true },
+    });
+
+    const map = new Map<string, { lift: number; currentStreak: number }>();
+    if (!prior) return map;
+
+    const rows = await this.prisma.streakCandidate.findMany({
+      where: { engineRunId: prior.id },
+      select: {
+        entityId: true,
+        marketDefinitionId: true,
+        selection: true,
+        context: true,
+        lift: true,
+        currentStreak: true,
+      },
+    });
+
+    for (const r of rows) {
+      map.set(this.sliceKey(r), { lift: r.lift, currentStreak: r.currentStreak });
+    }
+    return map;
+  }
+
+  private sliceKey(c: {
+    entityId: string;
+    marketDefinitionId: string;
+    selection: ObservationSelection | null;
+    context: unknown;
+  }): string {
+    const venue =
+      c.context && typeof c.context === 'object' && 'venue' in (c.context as object)
+        ? String((c.context as { venue?: unknown }).venue)
+        : 'ALL';
+    return `${c.entityId}::${c.marketDefinitionId}::${c.selection ?? 'ANY'}::${venue}`;
+  }
+
+  /**
+   * Where this slice sits in its lifecycle.
+   *
+   * BROKEN is recorded rather than deleted: a streak that just ended is the
+   * most informative row in the table when the time comes to ask whether any
+   * of this predicted anything.
+   */
+  private statusFor(
+    c: TestedCandidate,
+    survivedGate: boolean,
+    previous: Map<string, { lift: number; currentStreak: number }>,
+  ): StreakStatus {
+    const prior = previous.get(this.sliceKey(c));
+
+    // A run that was going and has stopped, whatever the gate says.
+    if (prior && prior.currentStreak > 0 && c.currentStreak === 0) {
+      return StreakStatus.BROKEN;
+    }
+
+    if (!survivedGate) return StreakStatus.FILTERED;
+    if (!prior) return StreakStatus.NEW;
+
+    const delta = c.lift - prior.lift;
+    if (delta > 0.02) return StreakStatus.STRENGTHENING;
+    if (delta < -0.02) return StreakStatus.WEAKENING;
+
+    return StreakStatus.ACTIVE;
   }
 
   /** Survivors of the most recent completed run, strongest first. */

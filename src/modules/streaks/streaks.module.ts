@@ -4,6 +4,8 @@ import { BaselinesService } from './baselines.service';
 import { CandidatesService } from './candidates.service';
 import { SnapshotsService } from './snapshots.service';
 import { PerformanceService } from './performance.service';
+import { ClustersService } from './clusters.service';
+import { ProfilesService } from './profiles.service';
 import { StreaksScheduler } from './streaks.scheduler';
 import { StreaksController } from './streaks.controller';
 
@@ -21,6 +23,8 @@ import { StreaksController } from './streaks.controller';
     CandidatesService,
     SnapshotsService,
     PerformanceService,
+    ClustersService,
+    ProfilesService,
     StreaksScheduler,
   ],
   exports: [
@@ -29,6 +33,8 @@ import { StreaksController } from './streaks.controller';
     CandidatesService,
     SnapshotsService,
     PerformanceService,
+    ClustersService,
+    ProfilesService,
   ],
 })
 export class StreaksModule {}
