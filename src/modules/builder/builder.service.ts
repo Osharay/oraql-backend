@@ -1,4 +1,5 @@
 import {
+import { describeMarket } from '../../common/market-copy';
   Injectable,
   NotFoundException,
   BadRequestException,
@@ -163,16 +164,28 @@ export class BuilderService {
       throw new BadRequestException('No selections to export');
     }
 
-    const lines = selections.map((s, i) => {
+    // Two lines per selection: the fixture, then the outcome in full. Pasted
+    // into a chat, a bare "Over 0.5 Goals" under two club names reads as
+    // belonging to one of them.
+    const lines = selections.flatMap((s, i) => {
       const event = s.market.event;
       const home = event.homeTeam.shortName || event.homeTeam.name;
       const away = event.awayTeam.shortName || event.awayTeam.name;
       const prob = (s.market.probability * 100).toFixed(1);
-      return `${i + 1}. ${home} vs ${away} — ${s.market.name} (${prob}%)`;
+      return [
+        `${i + 1}. ${home} v ${away}`,
+        `   ${describeMarket(s.market.name, event)} — ${prob}% chance`,
+      ];
     });
 
-    const header = `Oracle Bet Builder — ${selections.length} selections`;
-    const footer = `Combined probability: ${(combinedProbability * 100).toFixed(2)}%`;
+    const header = `OraQL Bet Builder — ${selections.length} selection${
+      selections.length === 1 ? '' : 's'
+    }`;
+    const footer = [
+      `${(combinedProbability * 100).toFixed(2)}% chance all ${selections.length} land,`,
+      'assuming they are independent of one another.',
+      'Estimates from historical data — not a guarantee.',
+    ].join(' ');
     const exportText = [header, '─'.repeat(40), ...lines, '─'.repeat(40), footer].join('\n');
 
     return { text: exportText, selections: selections.length, combinedProbability };

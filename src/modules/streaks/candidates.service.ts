@@ -500,12 +500,14 @@ export class CandidatesService {
       take: limit,
     });
 
+    const withEntities = await this.attachEntities(candidates);
+
     return {
       run,
       tier: 'suggestive',
       caveat:
         'Not distinguishable from baseline after correcting for the number of slices tested. Ranked by lift only — treat as exploratory, not as evidence.',
-      candidates,
+      candidates: withEntities,
     };
   }
 
@@ -583,6 +585,40 @@ export class CandidatesService {
     return StreakStatus.ACTIVE;
   }
 
+  /**
+   * A candidate stores only an entityId, so a card rendered from it names a
+   * market and never its subject — the same gap that had a client asking
+   * which team the "over 0.5" belonged to. Resolve the name here, once, so
+   * no surface has to guess.
+   */
+  private async attachEntities<T extends { entityType: string; entityId: string }>(
+    candidates: T[],
+  ): Promise<(T & { entity: { id: string; type: string; name: string; shortName: string | null } | null })[]> {
+    const teamIds = candidates.filter((c) => c.entityType === 'TEAM').map((c) => c.entityId);
+    const leagueIds = candidates.filter((c) => c.entityType === 'LEAGUE').map((c) => c.entityId);
+
+    const [teams, leagues] = await Promise.all([
+      teamIds.length
+        ? this.prisma.team.findMany({
+            where: { id: { in: Array.from(new Set(teamIds)) } },
+            select: { id: true, name: true, shortName: true },
+          })
+        : Promise.resolve([]),
+      leagueIds.length
+        ? this.prisma.league.findMany({
+            where: { id: { in: Array.from(new Set(leagueIds)) } },
+            select: { id: true, name: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const byId = new Map<string, { id: string; type: string; name: string; shortName: string | null }>();
+    for (const t of teams) byId.set(t.id, { id: t.id, type: 'TEAM', name: t.name, shortName: t.shortName ?? null });
+    for (const l of leagues) byId.set(l.id, { id: l.id, type: 'LEAGUE', name: l.name, shortName: null });
+
+    return candidates.map((c) => ({ ...c, entity: byId.get(c.entityId) ?? null }));
+  }
+
   /** Survivors of the most recent completed run, strongest first. */
   async getLatestSurvivors(limit = 50) {
     const run = await this.prisma.engineRun.findFirst({
@@ -602,6 +638,6 @@ export class CandidatesService {
       take: limit,
     });
 
-    return { run, candidates };
+    return { run, candidates: await this.attachEntities(candidates) };
   }
 }
