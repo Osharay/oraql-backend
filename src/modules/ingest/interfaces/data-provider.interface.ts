@@ -16,6 +16,15 @@ export interface FixtureData {
   status: string;
   homeScore?: number;
   awayScore?: number;
+
+  /**
+   * Names carried on the fixture payload itself. Providers return these
+   * alongside the ids, so populating them here avoids separate league/team
+   * sync calls and keeps records out of the "Unknown League" state.
+   */
+  league?: { name: string; country?: string; logoUrl?: string; season?: number };
+  homeTeam?: { name: string; shortName?: string; logoUrl?: string };
+  awayTeam?: { name: string; shortName?: string; logoUrl?: string };
 }
 
 export interface TeamData {
@@ -93,6 +102,20 @@ export interface OddsData {
   marketName: string;
   selection: string;
   odds: number;
+
+  /**
+   * Odds providers use their own event ids, which never match the fixture
+   * provider's. These three fields are what lets us resolve an odds record
+   * back to an Event (team names + kickoff window).
+   */
+  homeTeamName?: string;
+  awayTeamName?: string;
+  commenceAt?: Date;
+}
+
+export interface TeamRecentMatch {
+  fixture: FixtureData;
+  stats: MatchStatsData;
 }
 
 /**
@@ -112,6 +135,16 @@ export interface IDataProvider {
 
   /** Get historical match stats for a team */
   getMatchStats(teamExternalId: string, last?: number): Promise<MatchStatsData[]>;
+
+  /**
+   * Recent matches for a team, with the fixture alongside its stats.
+   * MatchStats rows need an Event to hang off, so the fixture has to come back
+   * with them or the stats cannot be persisted.
+   */
+  getTeamRecentMatches?(
+    teamExternalId: string,
+    last?: number,
+  ): Promise<TeamRecentMatch[]>;
 
   /** Get lineup for a fixture */
   getLineups(fixtureExternalId: string): Promise<LineupData[]>;

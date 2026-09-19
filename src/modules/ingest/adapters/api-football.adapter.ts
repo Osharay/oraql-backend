@@ -10,6 +10,7 @@ import {
   InjuryData,
   PlayerData,
   OddsData,
+  TeamRecentMatch,
 } from '../interfaces/data-provider.interface';
 
 /**
@@ -62,7 +63,12 @@ export class ApiFootballAdapter implements IDataProvider {
 
     const raw = await this.request<any[]>('fixtures', params);
 
-    return raw.map((f) => ({
+    return raw.map((f) => this.mapFixture(f));
+  }
+
+  /** Shared fixture mapping — the /fixtures payload shape is the same everywhere it appears. */
+  private mapFixture(f: any): FixtureData {
+    return {
       externalId: String(f.fixture.id),
       leagueExternalId: String(f.league.id),
       homeTeamExternalId: String(f.teams.home.id),
@@ -73,7 +79,15 @@ export class ApiFootballAdapter implements IDataProvider {
       status: this.mapStatus(f.fixture.status.short),
       homeScore: f.goals.home,
       awayScore: f.goals.away,
-    }));
+      league: {
+        name: f.league.name,
+        country: f.league.country,
+        logoUrl: f.league.logo,
+        season: f.league.season,
+      },
+      homeTeam: { name: f.teams.home.name, logoUrl: f.teams.home.logo },
+      awayTeam: { name: f.teams.away.name, logoUrl: f.teams.away.logo },
+    };
   }
 
   async getLeagues(season: number): Promise<LeagueData[]> {
@@ -107,12 +121,22 @@ export class ApiFootballAdapter implements IDataProvider {
   }
 
   async getMatchStats(teamExternalId: string, last = 10): Promise<MatchStatsData[]> {
+    const matches = await this.getTeamRecentMatches(teamExternalId, last);
+    return matches.map((m) => m.stats);
+  }
+
+  /**
+   * Recent matches with their stats. One /fixtures call plus one
+   * /fixtures/statistics call per fixture, so this costs `last + 1` requests
+   * per team — the most expensive call in the ingest path.
+   */
+  async getTeamRecentMatches(teamExternalId: string, last = 10): Promise<TeamRecentMatch[]> {
     const raw = await this.request<any[]>('fixtures', {
       team: teamExternalId,
       last: String(last),
     });
 
-    const stats: MatchStatsData[] = [];
+    const matches: TeamRecentMatch[] = [];
 
     for (const fixture of raw) {
       // Fetch detailed stats for each fixture
@@ -131,26 +155,29 @@ export class ApiFootballAdapter implements IDataProvider {
         const isHome = String(fixture.teams.home.id) === teamExternalId;
         const teamGoals = isHome ? fixture.goals.home : fixture.goals.away;
 
-        stats.push({
-          fixtureExternalId: String(fixture.fixture.id),
-          teamExternalId,
-          goals: teamGoals || 0,
-          shotsTotal: getStat('Total Shots'),
-          shotsOnTarget: getStat('Shots on Goal'),
-          possession: parseFloat(getStat('Ball Possession')?.replace('%', '') || '0'),
-          corners: getStat('Corner Kicks') || 0,
-          yellowCards: getStat('Yellow Cards') || 0,
-          redCards: getStat('Red Cards') || 0,
-          fouls: getStat('Fouls'),
-          offsides: getStat('Offsides'),
-          saves: getStat('Goalkeeper Saves'),
-          expectedGoals: parseFloat(getStat('expected_goals') || '0'),
-          passAccuracy: parseFloat(getStat('Passes %')?.replace('%', '') || '0'),
+        matches.push({
+          fixture: this.mapFixture(fixture),
+          stats: {
+            fixtureExternalId: String(fixture.fixture.id),
+            teamExternalId,
+            goals: teamGoals || 0,
+            shotsTotal: getStat('Total Shots'),
+            shotsOnTarget: getStat('Shots on Goal'),
+            possession: parseFloat(getStat('Ball Possession')?.replace('%', '') || '0'),
+            corners: getStat('Corner Kicks') || 0,
+            yellowCards: getStat('Yellow Cards') || 0,
+            redCards: getStat('Red Cards') || 0,
+            fouls: getStat('Fouls'),
+            offsides: getStat('Offsides'),
+            saves: getStat('Goalkeeper Saves'),
+            expectedGoals: parseFloat(getStat('expected_goals') || '0'),
+            passAccuracy: parseFloat(getStat('Passes %')?.replace('%', '') || '0'),
+          },
         });
       }
     }
 
-    return stats;
+    return matches;
   }
 
   async getLineups(fixtureExternalId: string): Promise<LineupData[]> {

@@ -6,10 +6,14 @@ import { PrismaService } from '@/common/prisma/prisma.service';
 import { ApiFootballAdapter } from './adapters/api-football.adapter';
 import { OddsApiAdapter } from './adapters/odds-api.adapter';
 import { EventStatus, IngestJobStatus } from '@prisma/client';
+import { FixtureData } from './interfaces/data-provider.interface';
 
 @Injectable()
 export class IngestService {
   private readonly logger = new Logger(IngestService.name);
+
+  /** Only refresh odds for events kicking off inside this window. */
+  private readonly ODDS_WINDOW_HOURS = 6;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -32,10 +36,23 @@ export class IngestService {
   }
 
   /**
-   * Odds refresh — every 5 minutes.
+   * Odds refresh — every 30 minutes, and only when something is about to start.
+   *
+   * The Odds API bills one credit per market per region per call. At the old
+   * cadence (every 5 minutes, 6 leagues x 3 markets x 2 regions, round the
+   * clock) this cost roughly 311k credits a month. Polling half-hourly, in one
+   * region, only when an event kicks off within ODDS_WINDOW_HOURS, brings it
+   * to a fraction of that — and odds barely move outside that window anyway.
    */
-  @Cron('*/5 * * * *', { name: 'odds-refresh', timeZone: 'UTC' })
+  @Cron('*/30 * * * *', { name: 'odds-refresh', timeZone: 'UTC' })
   async scheduleOddsRefresh() {
+    const upcoming = await this.getEventsInWindow(this.ODDS_WINDOW_HOURS);
+
+    if (upcoming.length === 0) {
+      this.logger.debug('Odds refresh skipped — no events near kickoff');
+      return;
+    }
+
     await this.ingestQueue.add('odds-refresh', {}, {
       attempts: 2,
       backoff: { type: 'fixed', delay: 10000 },
@@ -86,64 +103,8 @@ export class IngestService {
       let processed = 0;
 
       for (const fixture of fixtures) {
-        // Upsert league
-        await this.prisma.league.upsert({
-          where: { externalId: fixture.leagueExternalId },
-          create: {
-            externalId: fixture.leagueExternalId,
-            name: 'Unknown League', // Will be updated by league sync
-            season: new Date().getFullYear(),
-          },
-          update: {},
-        });
-
-        // Upsert teams
-        for (const teamExtId of [fixture.homeTeamExternalId, fixture.awayTeamExternalId]) {
-          await this.prisma.team.upsert({
-            where: { externalId: teamExtId },
-            create: { externalId: teamExtId, name: `Team ${teamExtId}` },
-            update: {},
-          });
-        }
-
-        // Resolve internal IDs
-        const league = await this.prisma.league.findUnique({
-          where: { externalId: fixture.leagueExternalId },
-        });
-        const homeTeam = await this.prisma.team.findUnique({
-          where: { externalId: fixture.homeTeamExternalId },
-        });
-        const awayTeam = await this.prisma.team.findUnique({
-          where: { externalId: fixture.awayTeamExternalId },
-        });
-
-        if (!league || !homeTeam || !awayTeam) continue;
-
-        // Upsert event
-        await this.prisma.event.upsert({
-          where: { externalId: fixture.externalId },
-          create: {
-            externalId: fixture.externalId,
-            leagueId: league.id,
-            homeTeamId: homeTeam.id,
-            awayTeamId: awayTeam.id,
-            kickoffAt: fixture.kickoffAt,
-            venue: fixture.venue,
-            round: fixture.round,
-            status: fixture.status as EventStatus,
-            homeScore: fixture.homeScore,
-            awayScore: fixture.awayScore,
-            lastDataSync: new Date(),
-          },
-          update: {
-            status: fixture.status as EventStatus,
-            homeScore: fixture.homeScore,
-            awayScore: fixture.awayScore,
-            lastDataSync: new Date(),
-          },
-        });
-
-        processed++;
+        const event = await this.upsertFixture(fixture);
+        if (event) processed++;
       }
 
       await this.updateJobRecord(job.id, IngestJobStatus.COMPLETED, processed);
@@ -166,12 +127,27 @@ export class IngestService {
     try {
       const odds = await this.oddsApi.getOddsForSport(sportKey);
 
-      // Store raw bookmaker odds
+      // The Odds API issues its own event ids, so odds have to be resolved back
+      // to our events by team name + kickoff window. Resolving once per odds
+      // event rather than per outcome keeps this to a handful of queries.
+      const resolved = new Map<string, string | null>();
       let processed = 0;
+      let unmatched = 0;
+
       for (const odd of odds) {
+        if (!resolved.has(odd.fixtureExternalId)) {
+          resolved.set(odd.fixtureExternalId, await this.resolveEventId(odd));
+        }
+        const eventId = resolved.get(odd.fixtureExternalId);
+
+        if (!eventId) {
+          unmatched++;
+          continue;
+        }
+
         await this.prisma.bookmakerOdds.create({
           data: {
-            eventId: odd.fixtureExternalId, // needs mapping in production
+            eventId,
             bookmaker: odd.bookmaker,
             marketName: odd.marketName,
             selection: odd.selection,
@@ -179,10 +155,14 @@ export class IngestService {
             impliedProb: 1 / odd.odds,
             fetchedAt: new Date(),
           },
-        }).catch(() => {
-          // Skip if event doesn't exist yet
         });
         processed++;
+      }
+
+      if (unmatched > 0) {
+        this.logger.warn(
+          `${unmatched} odds records for ${sportKey} did not match a known event`,
+        );
       }
 
       await this.updateJobRecord(job.id, IngestJobStatus.COMPLETED, processed);
@@ -192,6 +172,255 @@ export class IngestService {
       await this.updateJobRecord(job.id, IngestJobStatus.FAILED, 0, message);
       this.logger.error(`Odds ingest failed: ${message}`);
     }
+  }
+
+  /**
+   * Upsert a fixture and everything it depends on (league, both teams, event).
+   *
+   * Names come from the fixture payload, so an existing placeholder row is
+   * corrected on the next run rather than being left as "Unknown League".
+   */
+  private async upsertFixture(fixture: FixtureData) {
+    const leagueName = fixture.league?.name;
+    const league = await this.prisma.league.upsert({
+      where: { externalId: fixture.leagueExternalId },
+      create: {
+        externalId: fixture.leagueExternalId,
+        name: leagueName ?? `League ${fixture.leagueExternalId}`,
+        country: fixture.league?.country,
+        logoUrl: fixture.league?.logoUrl,
+        season: fixture.league?.season ?? new Date().getFullYear(),
+      },
+      update: leagueName
+        ? {
+            name: leagueName,
+            country: fixture.league?.country,
+            logoUrl: fixture.league?.logoUrl,
+          }
+        : {},
+    });
+
+    const teams = [
+      { extId: fixture.homeTeamExternalId, meta: fixture.homeTeam },
+      { extId: fixture.awayTeamExternalId, meta: fixture.awayTeam },
+    ];
+
+    const [homeTeam, awayTeam] = await Promise.all(
+      teams.map(({ extId, meta }) =>
+        this.prisma.team.upsert({
+          where: { externalId: extId },
+          create: {
+            externalId: extId,
+            name: meta?.name ?? `Team ${extId}`,
+            shortName: meta?.shortName,
+            logoUrl: meta?.logoUrl,
+          },
+          update: meta?.name
+            ? { name: meta.name, shortName: meta.shortName, logoUrl: meta.logoUrl }
+            : {},
+        }),
+      ),
+    );
+
+    if (!league || !homeTeam || !awayTeam) return null;
+
+    return this.prisma.event.upsert({
+      where: { externalId: fixture.externalId },
+      create: {
+        externalId: fixture.externalId,
+        leagueId: league.id,
+        homeTeamId: homeTeam.id,
+        awayTeamId: awayTeam.id,
+        kickoffAt: fixture.kickoffAt,
+        venue: fixture.venue,
+        round: fixture.round,
+        status: fixture.status as EventStatus,
+        homeScore: fixture.homeScore,
+        awayScore: fixture.awayScore,
+        lastDataSync: new Date(),
+      },
+      update: {
+        status: fixture.status as EventStatus,
+        homeScore: fixture.homeScore,
+        awayScore: fixture.awayScore,
+        lastDataSync: new Date(),
+      },
+    });
+  }
+
+  /**
+   * Pull a team's recent matches and persist their stats.
+   *
+   * The probability engine reads MatchStats and nothing was ever writing to it,
+   * so every computation ran on default values. Costs `last + 1` provider
+   * requests, hence the 24h freshness guard in shouldSyncTeamStats().
+   */
+  async ingestTeamHistory(teamExternalId: string, last = 10) {
+    const job = await this.createJobRecord('api_football', 'team_stats');
+
+    try {
+      const matches = await this.apiFootball.getTeamRecentMatches(teamExternalId, last);
+      let processed = 0;
+
+      for (const { fixture, stats } of matches) {
+        const event = await this.upsertFixture(fixture);
+        if (!event) continue;
+
+        const team = await this.prisma.team.findUnique({
+          where: { externalId: stats.teamExternalId },
+        });
+        if (!team) continue;
+
+        await this.prisma.matchStats.upsert({
+          where: { eventId_teamId: { eventId: event.id, teamId: team.id } },
+          create: {
+            eventId: event.id,
+            teamId: team.id,
+            goals: stats.goals ?? 0,
+            shotsTotal: stats.shotsTotal,
+            shotsOnTarget: stats.shotsOnTarget,
+            possession: stats.possession,
+            corners: stats.corners ?? 0,
+            yellowCards: stats.yellowCards ?? 0,
+            redCards: stats.redCards ?? 0,
+            fouls: stats.fouls,
+            offsides: stats.offsides,
+            saves: stats.saves,
+            expectedGoals: stats.expectedGoals,
+            passAccuracy: stats.passAccuracy,
+          },
+          update: {
+            goals: stats.goals ?? 0,
+            corners: stats.corners ?? 0,
+            yellowCards: stats.yellowCards ?? 0,
+            redCards: stats.redCards ?? 0,
+          },
+        });
+
+        processed++;
+      }
+
+      await this.updateJobRecord(job.id, IngestJobStatus.COMPLETED, processed);
+      this.logger.log(`Ingested ${processed} match stats for team ${teamExternalId}`);
+      return processed;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      await this.updateJobRecord(job.id, IngestJobStatus.FAILED, 0, message);
+      this.logger.error(`Team stats ingest failed for ${teamExternalId}: ${message}`);
+      return 0;
+    }
+  }
+
+  /**
+   * Skip teams whose history we already refreshed in the last 24 hours.
+   * Each sync costs ~11 provider requests, so this guard is what keeps a
+   * full fixture list from burning the daily quota.
+   */
+  async shouldSyncTeamStats(teamId: string): Promise<boolean> {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const recent = await this.prisma.matchStats.count({
+      where: { teamId, createdAt: { gte: since } },
+    });
+    return recent === 0;
+  }
+
+  /**
+   * Teams playing in the given window, as provider ids, de-duplicated.
+   */
+  async getTeamsNeedingStats(withinHours = 72): Promise<Array<{ id: string; externalId: string }>> {
+    const events = await this.prisma.event.findMany({
+      where: {
+        kickoffAt: {
+          gte: new Date(),
+          lte: new Date(Date.now() + withinHours * 60 * 60 * 1000),
+        },
+        status: { in: [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED] },
+      },
+      select: {
+        homeTeam: { select: { id: true, externalId: true } },
+        awayTeam: { select: { id: true, externalId: true } },
+      },
+    });
+
+    const seen = new Map<string, { id: string; externalId: string }>();
+    for (const e of events) {
+      for (const t of [e.homeTeam, e.awayTeam]) {
+        if (t?.externalId) seen.set(t.id, { id: t.id, externalId: t.externalId });
+      }
+    }
+    return [...seen.values()];
+  }
+
+  /**
+   * Events kicking off in the given window — used to gate odds polling and to
+   * decide which events are worth recomputing.
+   */
+  async getEventsInWindow(withinHours: number) {
+    return this.prisma.event.findMany({
+      where: {
+        kickoffAt: {
+          gte: new Date(),
+          lte: new Date(Date.now() + withinHours * 60 * 60 * 1000),
+        },
+        status: { in: [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED] },
+      },
+      select: { id: true, externalId: true, kickoffAt: true },
+      orderBy: { kickoffAt: 'asc' },
+    });
+  }
+
+  /**
+   * Match an odds record to an Event by team names within a kickoff window.
+   *
+   * Providers spell clubs differently ("Wolverhampton Wanderers" vs "Wolves"),
+   * so this compares normalised names and accepts a containment match either
+   * way. Anything ambiguous returns null and is skipped rather than guessed.
+   */
+  private async resolveEventId(odd: {
+    homeTeamName?: string;
+    awayTeamName?: string;
+    commenceAt?: Date;
+  }): Promise<string | null> {
+    if (!odd.homeTeamName || !odd.awayTeamName || !odd.commenceAt) return null;
+
+    const windowMs = 3 * 60 * 60 * 1000;
+    const candidates = await this.prisma.event.findMany({
+      where: {
+        kickoffAt: {
+          gte: new Date(odd.commenceAt.getTime() - windowMs),
+          lte: new Date(odd.commenceAt.getTime() + windowMs),
+        },
+      },
+      select: {
+        id: true,
+        homeTeam: { select: { name: true } },
+        awayTeam: { select: { name: true } },
+      },
+    });
+
+    const norm = (v: string) =>
+      v
+        .toLowerCase()
+        .replace(/[^a-z0-9 ]/g, '')
+        .replace(/\b(fc|afc|cf|sc|ac|calcio|club)\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const matches = (a: string, b: string) => {
+      const x = norm(a);
+      const y = norm(b);
+      if (!x || !y) return false;
+      return x === y || x.includes(y) || y.includes(x);
+    };
+
+    const hits = candidates.filter(
+      (c) =>
+        matches(c.homeTeam.name, odd.homeTeamName!) &&
+        matches(c.awayTeam.name, odd.awayTeamName!),
+    );
+
+    // Exactly one match, or we do not guess.
+    return hits.length === 1 ? hits[0].id : null;
   }
 
   // ─── Helpers ───

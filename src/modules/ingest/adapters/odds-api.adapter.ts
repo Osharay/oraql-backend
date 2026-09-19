@@ -42,10 +42,16 @@ export class OddsApiAdapter {
    * Get odds for a sport (e.g., "soccer_epl").
    * Maps The Odds API sport keys to our internal format.
    */
-  async getOddsForSport(sportKey: string, regions = 'uk,eu'): Promise<OddsData[]> {
+  async getOddsForSport(
+    sportKey: string,
+    regions = 'uk',
+    markets = 'h2h,totals,spreads',
+  ): Promise<OddsData[]> {
+    // The Odds API charges one credit per market per region per call, so both
+    // of these arguments multiply the bill. Defaults are deliberately narrow.
     const raw = await this.request<any[]>(`sports/${sportKey}/odds`, {
       regions,
-      markets: 'h2h,totals,spreads',
+      markets,
       oddsFormat: 'decimal',
     });
 
@@ -56,11 +62,14 @@ export class OddsApiAdapter {
         for (const market of bookmaker.markets || []) {
           for (const outcome of market.outcomes || []) {
             odds.push({
-              fixtureExternalId: event.id, // Odds API event ID
+              fixtureExternalId: event.id, // Odds API event ID — not an API-Football id
               bookmaker: bookmaker.key,
               marketName: this.mapMarketName(market.key),
               selection: outcome.name,
               odds: outcome.price,
+              homeTeamName: event.home_team,
+              awayTeamName: event.away_team,
+              commenceAt: event.commence_time ? new Date(event.commence_time) : undefined,
             });
           }
         }
