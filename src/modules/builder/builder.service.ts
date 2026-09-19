@@ -1,11 +1,11 @@
 import {
-import { describeMarket } from '../../common/market-copy';
   Injectable,
   NotFoundException,
   BadRequestException,
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
+import { describeMarket } from '@/common/market-copy';
 
 @Injectable()
 export class BuilderService {
