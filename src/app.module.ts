@@ -22,6 +22,7 @@ import { MarketsModule } from '@/modules/markets/markets.module';
 import { PicksModule } from '@/modules/picks/picks.module';
 import { BuilderModule } from '@/modules/builder/builder.module';
 import { IngestModule } from '@/modules/ingest/ingest.module';
+import { StreaksModule } from '@/modules/streaks/streaks.module';
 import { ProbabilityModule } from '@/modules/probability/probability.module';
 import { StorageModule } from '@/modules/storage/storage.module';
 
@@ -81,6 +82,7 @@ import { StorageModule } from '@/modules/storage/storage.module';
     PicksModule,
     BuilderModule,
     IngestModule,
+    StreaksModule,
     ProbabilityModule,
     StorageModule,
   ],

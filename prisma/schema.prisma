@@ -97,6 +97,8 @@ model League {
   isActive        Boolean  @default(true)
 
   events          Event[]
+  observations    MarketObservation[]
+  baselines       MarketBaseline[]
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -122,6 +124,8 @@ model Team {
   awayEvents      Event[]  @relation("AwayTeam")
   players         Player[]
   matchStats      MatchStats[]
+  observations    MarketObservation[]
+  marketProfiles  TeamMarketProfile[]
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -197,6 +201,8 @@ model Event {
   picks           Pick[]
   lineups         Lineup[]
   odds            BookmakerOdds[]
+  observations    MarketObservation[]
+  streakSnapshots StreakSnapshot[]
 
   // Timestamps
   lineupsConfirmedAt DateTime?
@@ -449,4 +455,317 @@ model IngestJob {
   @@index([provider, jobType, createdAt])
   @@index([status])
   @@map("ingest_jobs")
+}
+
+// ════════════════════════════════════════════
+// V2 — STREAK ENGINE
+// Append-only observation history, baselines, and the candidates
+// derived from them. Nothing here writes to Market or Pick: those
+// remain the per-event computed view.
+// ════════════════════════════════════════════
+
+enum ObservationResult {
+  WIN
+  LOSS
+  VOID
+  UNKNOWN
+}
+
+enum ObservationSelection {
+  HOME
+  AWAY
+  MATCH
+}
+
+enum DataQuality {
+  OK
+  PARTIAL
+  SUSPECT
+}
+
+enum StreakStatus {
+  NEW
+  ACTIVE
+  STRENGTHENING
+  WEAKENING
+  BROKEN
+  EXPIRED
+  FILTERED
+}
+
+enum StreakEntityType {
+  TEAM
+  LEAGUE
+  MATCHUP
+}
+
+enum ProfileFlag {
+  WATCH
+  NEUTRAL
+  CAUTION
+}
+
+/// Declarative registry of every market the engine can evaluate.
+/// Win conditions live in code (see market-definitions.ts); this table
+/// carries display metadata and the on/off switch.
+model MarketDefinition {
+  id            String         @id @default(uuid())
+  marketId      String         @unique // e.g. "TEAM_OVER_0_5"
+  displayName   String
+  shortName     String?
+  category      MarketCategory
+  line          Float?
+  /// Which sides this market can be evaluated for.
+  selections    ObservationSelection[]
+  /// Stat fields the evaluator needs; missing ones produce UNKNOWN.
+  requires      String[]
+  isActive      Boolean        @default(true)
+  notes         String?
+
+  observations  MarketObservation[]
+  baselines     MarketBaseline[]
+  candidates    StreakCandidate[]
+  profiles      TeamMarketProfile[]
+
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([isActive])
+  @@map("market_definitions")
+}
+
+/// One settled market outcome for one event. Append-only: corrections
+/// arrive as a new row pointing at the one they supersede.
+model MarketObservation {
+  id                 String              @id @default(uuid())
+  eventId            String
+  event              Event               @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  marketDefinitionId String
+  marketDefinition   MarketDefinition    @relation(fields: [marketDefinitionId], references: [id])
+
+  selection          ObservationSelection
+  line               Float?
+  result             ObservationResult
+
+  /// Denormalised for query speed — streak slices filter on these constantly.
+  leagueId           String
+  league             League              @relation(fields: [leagueId], references: [id])
+  season             Int
+  teamId             String?
+  team               Team?               @relation(fields: [teamId], references: [id])
+  isHome             Boolean?
+  kickoffAt          DateTime
+
+  oddsAtSettlement   Float?
+  impliedProbability Float?
+  dataQuality        DataQuality         @default(OK)
+
+  /// Append-only: a correction inserts revision 2 rather than editing revision 1,
+  /// so re-running derivation is idempotent and history is never rewritten.
+  revision           Int                 @default(1)
+
+  settledAt          DateTime            @default(now())
+  createdAt          DateTime            @default(now())
+
+  @@unique([eventId, marketDefinitionId, selection, revision])
+  @@index([marketDefinitionId, leagueId, season])
+  @@index([teamId, marketDefinitionId, kickoffAt(sort: Desc)])
+  @@index([kickoffAt])
+  @@index([result])
+  @@map("market_observations")
+}
+
+/// Expected hit rate for a market in a league and season. The number that
+/// turns a raw hit rate into lift.
+model MarketBaseline {
+  id                 String           @id @default(uuid())
+  marketDefinitionId String
+  marketDefinition   MarketDefinition @relation(fields: [marketDefinitionId], references: [id])
+  leagueId           String?
+  league             League?          @relation(fields: [leagueId], references: [id])
+  season             Int?
+
+  sampleSize         Int
+  wins               Int
+  baselineRate       Float
+
+  computedAt         DateTime         @default(now())
+
+  @@unique([marketDefinitionId, leagueId, season])
+  @@index([marketDefinitionId])
+  @@map("market_baselines")
+}
+
+/// One tested slice from one engine run. Most candidates never reach a user;
+/// they are kept so the multiple-comparisons correction has a denominator.
+model StreakCandidate {
+  id                 String           @id @default(uuid())
+  engineRunId        String
+  engineRun          EngineRun        @relation(fields: [engineRunId], references: [id], onDelete: Cascade)
+
+  entityType         StreakEntityType
+  entityId           String
+  marketDefinitionId String
+  marketDefinition   MarketDefinition @relation(fields: [marketDefinitionId], references: [id])
+  selection          ObservationSelection
+  /// Slice context, e.g. { "isHome": true }
+  context            Json?
+
+  sampleSize         Int
+  wins               Int
+  hitRate            Float
+  baselineRate       Float
+  lift               Float
+  pValue             Float?
+  adjustedPValue     Float?
+
+  currentStreak      Int              @default(0)
+  longestStreak      Int              @default(0)
+  last10             String?          // e.g. "WWLWWWWLWW"
+
+  strengthScore      Float            @default(0)
+  status             StreakStatus     @default(NEW)
+  survivedGate       Boolean          @default(false)
+
+  snapshots          StreakSnapshot[]
+
+  createdAt          DateTime         @default(now())
+
+  @@index([engineRunId, survivedGate])
+  @@index([marketDefinitionId, lift(sort: Desc)])
+  @@index([entityType, entityId])
+  @@map("streak_candidates")
+}
+
+/// Immutable record of what was shown, captured before kickoff.
+/// Without the cutoff, post-match information leaks into evaluation.
+model StreakSnapshot {
+  id                 String            @id @default(uuid())
+  streakCandidateId  String
+  streakCandidate    StreakCandidate   @relation(fields: [streakCandidateId], references: [id], onDelete: Cascade)
+  eventId            String
+  event              Event             @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  capturedAt         DateTime          @default(now())
+  dataCutoffAt       DateTime
+  kickoffAt          DateTime
+
+  hitRate            Float
+  baselineRate       Float
+  lift               Float
+  sampleSize         Int
+  currentStreak      Int
+  strengthScore      Float
+
+  oddsAtCapture      Float?
+  impliedProbability Float?
+  edge               Float?
+
+  displayedRank      Int?
+  wasDisplayed       Boolean           @default(false)
+
+  result             SnapshotResult?
+  clusterComponents  ClusterComponent[]
+
+  @@index([eventId])
+  @@index([kickoffAt])
+  @@index([wasDisplayed, kickoffAt])
+  @@map("streak_snapshots")
+}
+
+/// Settlement of a snapshot — the other half of the feedback loop.
+model SnapshotResult {
+  id                  String            @id @default(uuid())
+  snapshotId          String            @unique
+  snapshot            StreakSnapshot    @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+
+  result              ObservationResult
+  brokeStreakAtLength Int?
+  realisedLift        Float?
+  failureNotes        String?
+
+  settledAt           DateTime          @default(now())
+
+  @@index([result, settledAt])
+  @@map("snapshot_results")
+}
+
+/// Derived behaviour per team per market. Never hand-curated.
+model TeamMarketProfile {
+  id                 String           @id @default(uuid())
+  teamId             String
+  team               Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  marketDefinitionId String
+  marketDefinition   MarketDefinition @relation(fields: [marketDefinitionId], references: [id])
+
+  sampleSize         Int
+  wins               Int
+  hitRate            Float
+  baselineRate       Float
+  lift               Float
+  /// Spread of per-window hit rate around this team's own mean.
+  variance           Float?
+  flag               ProfileFlag      @default(NEUTRAL)
+
+  lastComputedAt     DateTime         @default(now())
+
+  @@unique([teamId, marketDefinitionId])
+  @@index([flag])
+  @@map("team_market_profiles")
+}
+
+/// One execution of the streak engine. candidatesTested is what the
+/// multiple-comparisons correction divides by, so it counts every slice
+/// tested including those discarded.
+model EngineRun {
+  id                   String            @id @default(uuid())
+  startedAt            DateTime          @default(now())
+  completedAt          DateTime?
+
+  eventsScanned        Int               @default(0)
+  observationsCreated  Int               @default(0)
+  candidatesTested     Int               @default(0)
+  candidatesSurviving  Int               @default(0)
+  clustersCreated      Int               @default(0)
+
+  errors               String?
+  warnings             String?
+
+  candidates           StreakCandidate[]
+  clusters             Cluster[]
+
+  @@index([startedAt])
+  @@map("engine_runs")
+}
+
+model Cluster {
+  id                  String             @id @default(uuid())
+  engineRunId         String?
+  engineRun           EngineRun?         @relation(fields: [engineRunId], references: [id])
+  date                DateTime
+  type                String             @default("DAILY_STRONGEST")
+  componentCount      Int
+  /// Product of component probabilities — shown with the same weight as the
+  /// component count, so a four-fold is not mistaken for four certainties.
+  combinedProbability Float
+  status              StreakStatus       @default(NEW)
+
+  components          ClusterComponent[]
+
+  createdAt           DateTime           @default(now())
+
+  @@index([date])
+  @@map("clusters")
+}
+
+model ClusterComponent {
+  id         String         @id @default(uuid())
+  clusterId  String
+  cluster    Cluster        @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  snapshotId String
+  snapshot   StreakSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  rank       Int
+
+  @@unique([clusterId, snapshotId])
+  @@map("cluster_components")
 }
