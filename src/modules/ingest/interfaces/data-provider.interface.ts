@@ -130,6 +130,12 @@ export interface IDataProvider {
   /** Get leagues for a sport/season */
   getLeagues(season: number): Promise<LeagueData[]>;
 
+  /** Every fixture in a league-season — the cheapest route to deep history. */
+  getFixturesByLeagueSeason?(
+    leagueExternalId: string,
+    season: number,
+  ): Promise<FixtureData[]>;
+
   /** Get teams for a league */
   getTeams(leagueExternalId: string, season: number): Promise<TeamData[]>;
 

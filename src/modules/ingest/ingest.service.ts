@@ -423,6 +423,166 @@ export class IngestService {
     return hits.length === 1 ? hits[0].id : null;
   }
 
+  /**
+   * Backfill one league-season. One provider request, ~380 fixtures with
+   * scores — enough to settle every goals, result, BTTS and handicap market.
+   *
+   * Corner and card markets need per-fixture statistics, which cost two
+   * requests each; that is a separate, explicitly budgeted job.
+   */
+  async backfillLeagueSeason(leagueExternalId: string, season: number) {
+    const job = await this.createJobRecord('api_football', 'backfill_league_season');
+
+    try {
+      const fixtures = await this.apiFootball.getFixturesByLeagueSeason(
+        leagueExternalId,
+        season,
+      );
+
+      let processed = 0;
+      let finished = 0;
+
+      for (const fixture of fixtures) {
+        const event = await this.upsertFixture(fixture);
+        if (!event) continue;
+        processed++;
+        if (event.status === EventStatus.FINISHED) finished++;
+      }
+
+      await this.updateJobRecord(job.id, IngestJobStatus.COMPLETED, processed);
+      this.logger.log(
+        `Backfilled league ${leagueExternalId} season ${season}: ${processed} fixtures, ${finished} finished`,
+      );
+
+      return { leagueExternalId, season, fixtures: processed, finished, requests: 1 };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      await this.updateJobRecord(job.id, IngestJobStatus.FAILED, 0, message);
+      this.logger.error(
+        `Backfill failed for league ${leagueExternalId} season ${season}: ${message}`,
+      );
+      return { leagueExternalId, season, fixtures: 0, finished: 0, requests: 1, error: message };
+    }
+  }
+
+  /**
+   * Per-fixture statistics for finished events that lack them.
+   *
+   * Two requests per fixture, so this is capped hard and defaults small. A
+   * full season of one league is ~760 requests: a tenth of the Pro daily
+   * allowance for one league-season of corner data.
+   */
+  async backfillMatchStats(options: {
+    leagueExternalId?: string;
+    season?: number;
+    maxRequests?: number;
+  }) {
+    const maxRequests = Math.min(options.maxRequests ?? 100, 2000);
+    const job = await this.createJobRecord('api_football', 'backfill_match_stats');
+
+    try {
+      const events = await this.prisma.event.findMany({
+        where: {
+          status: EventStatus.FINISHED,
+          matchStats: { none: {} },
+          ...(options.leagueExternalId
+            ? { league: { externalId: options.leagueExternalId } }
+            : {}),
+          ...(options.season ? { league: { season: options.season } } : {}),
+        },
+        select: {
+          id: true,
+          externalId: true,
+          homeTeam: { select: { id: true, externalId: true } },
+          awayTeam: { select: { id: true, externalId: true } },
+        },
+        orderBy: { kickoffAt: 'desc' },
+        take: Math.floor(maxRequests / 2),
+      });
+
+      let requests = 0;
+      let written = 0;
+
+      for (const event of events) {
+        if (requests + 2 > maxRequests) break;
+
+        for (const team of [event.homeTeam, event.awayTeam]) {
+          const stats = await this.apiFootball.getFixtureStatistics(
+            event.externalId,
+            team.externalId,
+          );
+          requests++;
+
+          if (!stats) continue;
+
+          await this.prisma.matchStats.upsert({
+            where: { eventId_teamId: { eventId: event.id, teamId: team.id } },
+            create: {
+              eventId: event.id,
+              teamId: team.id,
+              goals: stats.goals ?? 0,
+              shotsTotal: stats.shotsTotal,
+              shotsOnTarget: stats.shotsOnTarget,
+              possession: stats.possession,
+              corners: stats.corners ?? 0,
+              yellowCards: stats.yellowCards ?? 0,
+              redCards: stats.redCards ?? 0,
+              fouls: stats.fouls,
+              offsides: stats.offsides,
+              saves: stats.saves,
+              expectedGoals: stats.expectedGoals,
+              passAccuracy: stats.passAccuracy,
+            },
+            update: {
+              corners: stats.corners ?? 0,
+              yellowCards: stats.yellowCards ?? 0,
+              redCards: stats.redCards ?? 0,
+            },
+          });
+          written++;
+        }
+      }
+
+      await this.updateJobRecord(job.id, IngestJobStatus.COMPLETED, written);
+      this.logger.log(
+        `Stats backfill: ${written} rows from ${requests} requests across ${events.length} events`,
+      );
+
+      return { eventsConsidered: events.length, statsWritten: written, requests };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      await this.updateJobRecord(job.id, IngestJobStatus.FAILED, 0, message);
+      this.logger.error(`Stats backfill failed: ${message}`);
+      return { eventsConsidered: 0, statsWritten: 0, requests: 0, error: message };
+    }
+  }
+
+  /**
+   * What a backfill plan would cost, without spending anything.
+   *
+   * Goal-based markets are effectively free to backfill; corner and card
+   * markets are not, and the difference is large enough to decide scope.
+   */
+  async estimateBackfill(leagueExternalIds: string[], seasons: number[]) {
+    const combos = leagueExternalIds.length * seasons.length;
+    const fixturesPerSeason = 380;
+
+    const pendingStats = await this.prisma.event.count({
+      where: { status: EventStatus.FINISHED, matchStats: { none: {} } },
+    });
+
+    return {
+      leagueSeasons: combos,
+      fixtureRequests: combos,
+      approxFixtures: combos * fixturesPerSeason,
+      marketsCoveredByFixturesAlone:
+        'goals, result, BTTS, double chance, handicaps — about 20 of the 27 definitions',
+      statsRequestsForFullCoverage: pendingStats * 2,
+      statsNote:
+        'Corner and card markets need two requests per fixture. Run backfillMatchStats with an explicit maxRequests rather than sweeping a season.',
+    };
+  }
+
   // ─── Helpers ───
 
   private async createJobRecord(provider: string, jobType: string) {

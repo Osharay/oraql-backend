@@ -90,6 +90,26 @@ export class ApiFootballAdapter implements IDataProvider {
     };
   }
 
+  /**
+   * Every fixture in a league-season, in ONE request.
+   *
+   * This is the cheapest history there is: a single call returns ~380 matches
+   * with final scores, which is enough to settle every goals, result, BTTS and
+   * handicap market in the registry. Backfilling by team instead would cost
+   * hundreds of calls for the same data.
+   */
+  async getFixturesByLeagueSeason(
+    leagueExternalId: string,
+    season: number,
+  ): Promise<FixtureData[]> {
+    const raw = await this.request<any[]>('fixtures', {
+      league: leagueExternalId,
+      season: String(season),
+    });
+
+    return raw.map((f) => this.mapFixture(f));
+  }
+
   async getLeagues(season: number): Promise<LeagueData[]> {
     const raw = await this.request<any[]>('leagues', { season: String(season) });
 
@@ -118,6 +138,54 @@ export class ApiFootballAdapter implements IDataProvider {
       venueName: t.venue?.name,
       venueCity: t.venue?.city,
     }));
+  }
+
+  /**
+   * Statistics for one team in one fixture. One request.
+   *
+   * Returns null when the provider has no statistics for that fixture, which
+   * is common for lower divisions and older seasons — the caller records
+   * nothing rather than inventing zeros.
+   */
+  async getFixtureStatistics(
+    fixtureExternalId: string,
+    teamExternalId: string,
+  ): Promise<MatchStatsData | null> {
+    const raw = await this.request<any[]>('fixtures/statistics', {
+      fixture: fixtureExternalId,
+      team: teamExternalId,
+    });
+
+    if (!raw?.length) return null;
+
+    const s = raw[0];
+    const getStat = (type: string) => {
+      const found = s.statistics?.find((st: any) => st.type === type);
+      return found?.value;
+    };
+
+    const parsePct = (v: unknown): number | undefined => {
+      if (typeof v !== 'string') return undefined;
+      const n = parseFloat(v.replace('%', ''));
+      return Number.isFinite(n) ? n : undefined;
+    };
+
+    return {
+      fixtureExternalId,
+      teamExternalId,
+      goals: 0, // scores live on the Event; stats endpoints do not carry them
+      shotsTotal: getStat('Total Shots') ?? undefined,
+      shotsOnTarget: getStat('Shots on Goal') ?? undefined,
+      possession: parsePct(getStat('Ball Possession')),
+      corners: getStat('Corner Kicks') ?? 0,
+      yellowCards: getStat('Yellow Cards') ?? 0,
+      redCards: getStat('Red Cards') ?? 0,
+      fouls: getStat('Fouls') ?? undefined,
+      offsides: getStat('Offsides') ?? undefined,
+      saves: getStat('Goalkeeper Saves') ?? undefined,
+      expectedGoals: parseFloat(getStat('expected_goals') ?? '') || undefined,
+      passAccuracy: parsePct(getStat('Passes %')),
+    };
   }
 
   async getMatchStats(teamExternalId: string, last = 10): Promise<MatchStatsData[]> {

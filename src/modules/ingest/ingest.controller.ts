@@ -59,6 +59,59 @@ export class IngestController {
     return { queued: 'team-stats-sweep', jobId: job.id };
   }
 
+  @Post('backfill')
+  @ApiOperation({ summary: 'Backfill league-seasons — one request each, scores only' })
+  async backfill(
+    @CurrentUser() user: { role?: UserRole },
+    @Body() body: { leagues: string[]; seasons: number[] },
+  ) {
+    this.assertAdmin(user);
+
+    const leagues = body?.leagues ?? [];
+    const seasons = body?.seasons ?? [];
+    if (!leagues.length || !seasons.length) {
+      return { error: 'Provide leagues (provider ids) and seasons' };
+    }
+
+    const results = [];
+    for (const league of leagues) {
+      for (const season of seasons) {
+        results.push(await this.ingestService.backfillLeagueSeason(league, season));
+      }
+    }
+
+    return {
+      requests: results.length,
+      fixtures: results.reduce((n, r) => n + r.fixtures, 0),
+      finished: results.reduce((n, r) => n + r.finished, 0),
+      results,
+    };
+  }
+
+  @Post('backfill/stats')
+  @ApiOperation({ summary: 'Backfill per-fixture stats — two requests per fixture, capped' })
+  async backfillStats(
+    @CurrentUser() user: { role?: UserRole },
+    @Body() body: { leagueExternalId?: string; season?: number; maxRequests?: number },
+  ) {
+    this.assertAdmin(user);
+    return this.ingestService.backfillMatchStats({
+      leagueExternalId: body?.leagueExternalId,
+      season: body?.season,
+      maxRequests: body?.maxRequests ?? 100,
+    });
+  }
+
+  @Post('backfill/estimate')
+  @ApiOperation({ summary: 'What a backfill would cost, without spending anything' })
+  async estimate(
+    @CurrentUser() user: { role?: UserRole },
+    @Body() body: { leagues: string[]; seasons: number[] },
+  ) {
+    this.assertAdmin(user);
+    return this.ingestService.estimateBackfill(body?.leagues ?? [], body?.seasons ?? []);
+  }
+
   @Post('compute')
   @ApiOperation({ summary: 'Recompute probabilities for events kicking off soon' })
   async runCompute(@CurrentUser() user: { role?: UserRole }) {
