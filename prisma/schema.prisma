@@ -607,8 +607,10 @@ model StreakCandidate {
   entityId           String
   marketDefinitionId String
   marketDefinition   MarketDefinition @relation(fields: [marketDefinitionId], references: [id])
-  selection          ObservationSelection
-  /// Slice context, e.g. { "isHome": true }
+  /// Null when the slice is venue-agnostic: the side is resolved per fixture
+  /// at snapshot time, because "this team, any venue" has no fixed selection.
+  selection          ObservationSelection?
+  /// Slice context, e.g. { "venue": "ALL" }
   context            Json?
 
   sampleSize         Int

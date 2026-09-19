@@ -114,7 +114,7 @@ export class PerformanceService {
     return broken.map((b) => ({
       fixture: `${b.snapshot.event.homeTeam.name} v ${b.snapshot.event.awayTeam.name}`,
       market: b.snapshot.streakCandidate.marketDefinition.displayName,
-      selection: b.snapshot.streakCandidate.selection,
+      selection: b.snapshot.streakCandidate.selection ?? 'ANY VENUE',
       streakBefore: b.brokeStreakAtLength,
       hitRate: b.snapshot.hitRate,
       baselineRate: b.snapshot.baselineRate,

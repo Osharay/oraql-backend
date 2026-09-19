@@ -17,6 +17,7 @@ type Venue = 'ALL' | 'HOME' | 'AWAY';
 
 interface SliceRow {
   result: 'WIN' | 'LOSS';
+  selection: ObservationSelection;
   isHome: boolean | null;
   leagueId: string;
   season: number;
@@ -27,7 +28,7 @@ interface TestedCandidate {
   entityType: StreakEntityType;
   entityId: string;
   marketDefinitionId: string;
-  selection: ObservationSelection;
+  selection: ObservationSelection | null;
   context: Prisma.InputJsonValue;
   sampleSize: number;
   wins: number;
@@ -67,12 +68,23 @@ export class CandidatesService {
   private readonly ALPHA = 0.1;
 
   /**
-   * Contexts tested per market. Every extra context multiplies the number of
-   * tests AND divides the sample, which pushes the gate out of reach twice
-   * over — a venue split halves n while doubling m. Default is the whole
-   * record; venue slices are opt-in and only worth it with deep history.
+   * A venue split halves the sample while tripling the test count, so it is
+   * only affordable where there is sample to spare. Slices are tested whole
+   * first, and split only when the combined record reaches this multiple of
+   * the floor.
+   *
+   * Set to 3 from simulation (120 teams x 27 markets, +0.15 edge, 40 real
+   * signals). Detections of the combined slices:
+   *
+   *   3 seasons  split-only 6/40   combined 28/40   with splits 25/40
+   *   4 seasons  split-only 2/40   combined 32/40   with splits 30/40
+   *   6 seasons  split-only 27/40  combined 38/40   with splits 37/40
+   *
+   * Splitting at three seasons costs ~11% of combined detections for little
+   * return; at four or more the cost falls and venue evidence is worth having.
+   * A floor multiple of 3 lands the switch at roughly four seasons.
    */
-  private readonly DEFAULT_CONTEXTS: Venue[] = ['ALL'];
+  private readonly VENUE_SPLIT_MULTIPLE = 3;
 
   /** Observations to consider per team — roughly three seasons. */
   private readonly LOOKBACK = 600;
@@ -83,8 +95,8 @@ export class CandidatesService {
   constructor(private readonly prisma: PrismaService) {}
 
   async runEngine(options?: {
-    contexts?: Venue[];
     minSample?: number;
+    splitByVenue?: boolean;
   }): Promise<{
     engineRunId: string;
     tested: number;
@@ -93,8 +105,9 @@ export class CandidatesService {
     gateThreshold: number;
     note: string;
   }> {
-    const contexts = options?.contexts ?? this.DEFAULT_CONTEXTS;
     const minSample = options?.minSample ?? this.MIN_SAMPLE;
+    const splitByVenue = options?.splitByVenue ?? true;
+    const splitFloor = minSample * this.VENUE_SPLIT_MULTIPLE;
     const run = await this.prisma.engineRun.create({ data: {} });
 
     try {
@@ -129,19 +142,38 @@ export class CandidatesService {
         const rowsByKey = await this.loadTeamSlices(team.id);
         eventsSeen += rowsByKey.size;
 
-        for (const [key, rows] of rowsByKey) {
-          const [marketDefinitionId, selection] = key.split('::');
+        for (const [marketDefinitionId, rows] of rowsByKey) {
+          // Fixture-level markets have no side to resolve; team markets do,
+          // and testing them whole is what keeps the sample usable.
+          const isFixtureLevel = rows[0]?.selection === ObservationSelection.MATCH;
+          const combinedSelection = isFixtureLevel ? ObservationSelection.MATCH : null;
 
-          for (const venue of contexts) {
-            const subset =
-              venue === 'ALL'
-                ? rows
-                : rows.filter((r) => r.isHome === (venue === 'HOME'));
+          const combined = this.testSlice(
+            team.id,
+            marketDefinitionId,
+            combinedSelection,
+            'ALL',
+            rows,
+            baselineMap,
+            minSample,
+          );
+          if (combined) tested.push(combined);
+
+          // Only spend the split where the record can carry it.
+          if (!splitByVenue || rows.length < splitFloor) continue;
+
+          for (const venue of ['HOME', 'AWAY'] as const) {
+            const subset = rows.filter((r) => r.isHome === (venue === 'HOME'));
+            const selection = isFixtureLevel
+              ? ObservationSelection.MATCH
+              : venue === 'HOME'
+                ? ObservationSelection.HOME
+                : ObservationSelection.AWAY;
 
             const candidate = this.testSlice(
               team.id,
               marketDefinitionId,
-              selection as ObservationSelection,
+              selection,
               venue,
               subset,
               baselineMap,
@@ -237,6 +269,8 @@ export class CandidatesService {
    * team we are slicing for.
    */
   private async loadTeamSlices(teamId: string): Promise<Map<string, SliceRow[]>> {
+    // Keyed by market alone: a team's home and away records for the same
+    // market are one body of evidence until there is enough to split them.
     const observations = await this.prisma.marketObservation.findMany({
       where: {
         result: { in: [ObservationResult.WIN, ObservationResult.LOSS] },
@@ -265,7 +299,7 @@ export class CandidatesService {
     const byKey = new Map<string, SliceRow[]>();
 
     for (const o of observations) {
-      const key = `${o.marketDefinitionId}::${o.selection}`;
+      const key = o.marketDefinitionId;
       const isHome =
         o.selection === ObservationSelection.MATCH
           ? o.event.homeTeamId === teamId
@@ -274,6 +308,7 @@ export class CandidatesService {
       const list = byKey.get(key) ?? [];
       list.push({
         result: o.result as 'WIN' | 'LOSS',
+        selection: o.selection,
         isHome,
         leagueId: o.leagueId,
         season: o.season,
@@ -288,7 +323,7 @@ export class CandidatesService {
   private testSlice(
     teamId: string,
     marketDefinitionId: string,
-    selection: ObservationSelection,
+    selection: ObservationSelection | null,
     venue: Venue,
     rows: SliceRow[],
     baselineMap: Map<string, number>,

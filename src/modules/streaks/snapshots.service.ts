@@ -105,14 +105,19 @@ export class SnapshotsService {
         continue;
       }
 
+      // A candidate applies only where its evidence applies:
+      //   HOME/AWAY  — measured at that venue, so only that side
+      //   MATCH      — fixture-level, either side (deduped below)
+      //   null       — venue-agnostic team slice, whichever side the team is on
       const applicable = [
         ...(byTeam.get(event.homeTeamId) ?? []).filter(
           (c) =>
+            c.selection === null ||
             c.selection === ObservationSelection.HOME ||
             c.selection === ObservationSelection.MATCH,
         ),
         ...(byTeam.get(event.awayTeamId) ?? []).filter(
-          (c) => c.selection === ObservationSelection.AWAY,
+          (c) => c.selection === null || c.selection === ObservationSelection.AWAY,
         ),
       ];
 
@@ -205,8 +210,9 @@ export class SnapshotsService {
         eventId: true,
         baselineRate: true,
         currentStreak: true,
+        event: { select: { homeTeamId: true } },
         streakCandidate: {
-          select: { marketDefinitionId: true, selection: true },
+          select: { marketDefinitionId: true, selection: true, entityId: true },
         },
       },
       take: limit,
@@ -216,11 +222,19 @@ export class SnapshotsService {
     let unmatched = 0;
 
     for (const s of pending) {
+      // Venue-agnostic candidates carry no selection, so the side is resolved
+      // here from the fixture — the same resolution used when capturing.
+      const selection =
+        s.streakCandidate.selection ??
+        (s.event.homeTeamId === s.streakCandidate.entityId
+          ? ObservationSelection.HOME
+          : ObservationSelection.AWAY);
+
       const observation = await this.prisma.marketObservation.findFirst({
         where: {
           eventId: s.eventId,
           marketDefinitionId: s.streakCandidate.marketDefinitionId,
-          selection: s.streakCandidate.selection,
+          selection,
         },
         orderBy: { revision: 'desc' },
         select: { result: true },
