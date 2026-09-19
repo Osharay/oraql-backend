@@ -86,8 +86,18 @@ export class CandidatesService {
    */
   private readonly VENUE_SPLIT_MULTIPLE = 3;
 
-  /** Observations to consider per team — roughly three seasons. */
-  private readonly LOOKBACK = 600;
+  /**
+   * History window, in days. Two seasons.
+   *
+   * Bounded by time rather than row count: one match produces ~30 observations
+   * for a team (one per applicable market and selection), so a row cap of 600
+   * is about 20 matches — far below the floor, which meant no slice could ever
+   * be tested. Always express this window in matches, never in rows.
+   */
+  private readonly LOOKBACK_DAYS = 730;
+
+  /** Safety cap so a pathological team cannot pull an unbounded result set. */
+  private readonly MAX_OBSERVATION_ROWS = 6000;
 
   /** Lift that earns full marks on the lift component of the score. */
   private readonly LIFT_FULL_MARKS = 0.3;
@@ -97,6 +107,8 @@ export class CandidatesService {
   async runEngine(options?: {
     minSample?: number;
     splitByVenue?: boolean;
+    /** Test every team rather than only those with a fixture coming up. */
+    allTeams?: boolean;
   }): Promise<{
     engineRunId: string;
     tested: number;
@@ -124,7 +136,9 @@ export class CandidatesService {
             baselineRate: true,
           },
         }),
-        this.prisma.team.findMany({ select: { id: true } }),
+        options?.allTeams
+          ? this.prisma.team.findMany({ select: { id: true } })
+          : this.teamsWithUpcomingFixtures(),
       ]);
 
       // Per-market floors override the engine default: what counts as enough
@@ -270,6 +284,34 @@ export class CandidatesService {
   }
 
   /**
+   * Teams with a fixture inside the snapshot window.
+   *
+   * Testing a team with no upcoming fixture produces a candidate that can
+   * never be snapshotted, while still counting towards the correction and so
+   * raising the bar for every candidate that can. Narrowing here buys real
+   * statistical power, not just speed.
+   */
+  private async teamsWithUpcomingFixtures(withinDays = 7) {
+    const events = await this.prisma.event.findMany({
+      where: {
+        kickoffAt: {
+          gte: new Date(),
+          lte: new Date(Date.now() + withinDays * 24 * 3600_000),
+        },
+      },
+      select: { homeTeamId: true, awayTeamId: true },
+    });
+
+    const ids = new Set<string>();
+    for (const e of events) {
+      ids.add(e.homeTeamId);
+      ids.add(e.awayTeamId);
+    }
+
+    return [...ids].map((id) => ({ id }));
+  }
+
+  /**
    * Observations for a team, keyed by market and selection.
    *
    * MATCH-selection rows carry no teamId — they belong to the fixture, not a
@@ -279,9 +321,12 @@ export class CandidatesService {
   private async loadTeamSlices(teamId: string): Promise<Map<string, SliceRow[]>> {
     // Keyed by market alone: a team's home and away records for the same
     // market are one body of evidence until there is enough to split them.
+    const since = new Date(Date.now() - this.LOOKBACK_DAYS * 24 * 3600_000);
+
     const observations = await this.prisma.marketObservation.findMany({
       where: {
         result: { in: [ObservationResult.WIN, ObservationResult.LOSS] },
+        kickoffAt: { gte: since },
         OR: [
           { teamId },
           {
@@ -301,7 +346,7 @@ export class CandidatesService {
         event: { select: { homeTeamId: true } },
       },
       orderBy: { kickoffAt: 'desc' },
-      take: this.LOOKBACK,
+      take: this.MAX_OBSERVATION_ROWS,
     });
 
     const byKey = new Map<string, SliceRow[]>();
