@@ -4,7 +4,7 @@ import { MarketsService } from '@/modules/markets/markets.service';
 import { PicksService } from '@/modules/picks/picks.service';
 import { EventsGateway } from '@/modules/events/events.gateway';
 import { ExplanationService } from './explanation.service';
-import { MarketCategory, Prisma } from '@prisma/client';
+import { MarketCategory, Prisma, EventStatus } from '@prisma/client';
 
 /**
  * Core Probability Engine.
@@ -124,6 +124,10 @@ export class ProbabilityService {
     // Goals Markets
     const goalsMarkets = this.computeGoalsMarkets(homeStats, awayStats);
     markets.push(...goalsMarkets);
+
+    // Team goal totals — "over 0.5" is only betable at team level
+    const teamGoalsMarkets = this.computeTeamGoalsMarkets(homeStats, awayStats, teams);
+    markets.push(...teamGoalsMarkets);
 
     // Corners Markets
     const cornersMarkets = this.computeCornersMarkets(homeStats, awayStats);
@@ -258,7 +262,11 @@ export class ProbabilityService {
 
   private computeGoalsMarkets(homeStats: TeamHistoryStats, awayStats: TeamHistoryStats) {
     const avgGoals = homeStats.avgGoalsScored + awayStats.avgGoalsScored;
-    const lines = [0.5, 1.5, 2.5, 3.5, 4.5];
+    // No 0.5 line on match totals. Most books do not price it, and where they
+    // do the odds are negligible, so a 97% "pick" on it is not something a
+    // user can act on. The streak registry already starts match totals at 1.5.
+    // Over 0.5 is betable as a TEAM total, which computeTeamGoalsMarkets does.
+    const lines = [1.5, 2.5, 3.5, 4.5];
     const markets: any[] = [];
 
     for (const line of lines) {
@@ -293,6 +301,80 @@ export class ProbabilityService {
           avgGoals: Math.round(avgGoals * 100) / 100,
         } as unknown as Prisma.JsonObject,
       });
+    }
+
+    return markets;
+  }
+
+  /**
+   * Team goal totals — the betable form of an "over 0.5".
+   *
+   * Over 0.5 on the match total is close to a certainty and is barely priced;
+   * over 0.5 for one team is a real market ("team to score"). These are taken
+   * from the team's own record rather than from a Poisson fit, because the
+   * record answers the question directly: over 0.5 is the share of matches in
+   * which the team scored, over 1.5 the share in which it scored twice.
+   */
+  private computeTeamGoalsMarkets(
+    homeStats: TeamHistoryStats,
+    awayStats: TeamHistoryStats,
+    teams: { home: string; away: string },
+  ) {
+    const markets: any[] = [];
+
+    const sides: Array<{ name: string; stats: TeamHistoryStats; tag: string }> = [
+      { name: teams.home, stats: homeStats, tag: 'H' },
+      { name: teams.away, stats: awayStats, tag: 'A' },
+    ];
+
+    for (const side of sides) {
+      const { stats, name } = side;
+      if (stats.matchCount === 0) continue;
+
+      const confidence = stats.matchCount >= 5 ? 0.65 : 0.35;
+
+      const rates: Array<{ line: number; scoredIn: number }> = [
+        { line: 0.5, scoredIn: stats.matchesScored },
+        { line: 1.5, scoredIn: stats.matchesScored2Plus },
+      ];
+
+      for (const { line, scoredIn } of rates) {
+        // Laplace smoothing keeps a short record from producing a 0% or 100%
+        // that the sample cannot support.
+        const rate = (scoredIn + 1) / (stats.matchCount + 2);
+        const probability = Math.max(0.01, Math.min(0.99, rate));
+
+        markets.push({
+          category: MarketCategory.GOALS,
+          name: `${name} Goals: Over ${line}`,
+          shortName: `${side.tag} O${line}`,
+          line,
+          probability,
+          confidence,
+          explanation: '',
+          explanationFactors: {
+            team: name,
+            scoredIn,
+            of: stats.matchCount,
+            observedRate: Math.round((scoredIn / stats.matchCount) * 100) / 100,
+          } as unknown as Prisma.JsonObject,
+        });
+
+        markets.push({
+          category: MarketCategory.GOALS,
+          name: `${name} Goals: Under ${line}`,
+          shortName: `${side.tag} U${line}`,
+          line,
+          probability: 1 - probability,
+          confidence,
+          explanation: '',
+          explanationFactors: {
+            team: name,
+            scoredIn,
+            of: stats.matchCount,
+          } as unknown as Prisma.JsonObject,
+        });
+      }
     }
 
     return markets;
@@ -459,10 +541,18 @@ export class ProbabilityService {
    * Fetch aggregated historical stats for a team.
    */
   private async getTeamHistory(teamId: string): Promise<TeamHistoryStats> {
+    // Ordered by kickoff, not createdAt: after a bulk backfill every row is
+    // written within seconds of the others, so ordering by createdAt makes
+    // "recent form" an artefact of ingest order rather than of time.
     const stats = await this.prisma.matchStats.findMany({
-      where: { teamId },
-      orderBy: { createdAt: 'desc' },
+      where: { teamId, event: { status: EventStatus.FINISHED } },
+      orderBy: { event: { kickoffAt: 'desc' } },
       take: this.MATCH_WINDOW,
+      include: {
+        event: {
+          select: { homeTeamId: true, homeScore: true, awayScore: true },
+        },
+      },
     });
 
     if (stats.length === 0) {
@@ -493,7 +583,23 @@ export class ProbabilityService {
       weighted.reduce((sum, w) => sum + (w.shotsOnTarget || 0) * w.weight, 0) / totalWeight;
 
     const matchesScored = stats.filter((s) => s.goals > 0).length;
-    const wins = stats.filter((s) => s.goals > 0).length; // simplified — needs opponent goals
+    const matchesScored2Plus = stats.filter((s) => s.goals > 1).length;
+
+    // winRate previously counted matches in which the team SCORED, which is a
+    // different quantity entirely — it made winRate identical to the scoring
+    // rate and fed that into the match-result markets. A team that scores in
+    // most of its matches is not a team that wins most of its matches.
+    let decided = 0;
+    let wins = 0;
+    for (const row of stats) {
+      const { homeTeamId, homeScore, awayScore } = row.event;
+      if (homeScore == null || awayScore == null) continue;
+      decided++;
+      const isHome = homeTeamId === teamId;
+      const scored = isHome ? homeScore : awayScore;
+      const conceded = isHome ? awayScore : homeScore;
+      if (scored > conceded) wins++;
+    }
 
     return {
       matchCount: stats.length,
@@ -503,8 +609,9 @@ export class ProbabilityService {
       avgRedCards: Math.round(avgRedCards * 100) / 100,
       avgPossession: Math.round(avgPossession * 100) / 100,
       avgShotsOnTarget: Math.round(avgShotsOnTarget * 100) / 100,
-      winRate: wins / stats.length,
+      winRate: decided > 0 ? wins / decided : 0.33,
       matchesScored,
+      matchesScored2Plus,
     };
   }
 
@@ -538,6 +645,7 @@ export class ProbabilityService {
       avgShotsOnTarget: 4.0,
       winRate: 0.33,
       matchesScored: 0,
+      matchesScored2Plus: 0,
     };
   }
 }
@@ -553,7 +661,10 @@ interface TeamHistoryStats {
   avgPossession: number;
   avgShotsOnTarget: number;
   winRate: number;
+  /** Matches in which the team scored at least once. */
   matchesScored: number;
+  /** Matches in which the team scored at least twice. */
+  matchesScored2Plus: number;
 }
 
 interface InjuryInfo {

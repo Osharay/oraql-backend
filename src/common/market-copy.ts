@@ -6,9 +6,12 @@
  * on the card. Anything the API renders as prose — the builder export above
  * all, which gets pasted into WhatsApp — states the subject explicitly.
  *
- * The frontend has a fuller counterpart at oracle-web/src/lib/market-copy.ts;
- * both parse the current names ("Match Goals: Over 2.5") and the ones written
- * before the rename ("Over 2.5 Goals"), because both are in the database.
+ * Names are stored in one shape, "<subject> <metric>: <Over|Under> <line>",
+ * where the subject is either "Match" or a club. The parser also reads the
+ * names written before the rename ("Over 2.5 Goals"), because those rows are
+ * still in the database.
+ *
+ * The frontend has a fuller counterpart at oracle-web/src/lib/market-copy.ts.
  */
 
 export interface TeamLike {
@@ -19,7 +22,8 @@ export interface TeamLike {
 const team = (t: TeamLike) => t.shortName || t.name;
 
 interface Parsed {
-  kind: 'total' | 'result' | 'btts' | 'unknown';
+  kind: 'matchTotal' | 'teamTotal' | 'result' | 'btts' | 'unknown';
+  subject?: string;
   metric?: string;
   direction?: 'over' | 'under';
   line?: number;
@@ -30,20 +34,25 @@ interface Parsed {
 function parse(name: string): Parsed {
   const n = name.trim();
 
-  const current = /^Match\s+(Goals|Corners|Cards)\s*:\s*(Over|Under)\s+([\d.]+)/i.exec(n);
-  if (current) {
+  // "Match Goals: Over 2.5" / "Arsenal Goals: Over 0.5"
+  const totals = /^(.+?)\s+(Goals|Corners|Cards)\s*:\s*(Over|Under)\s+([\d.]+)$/i.exec(n);
+  if (totals) {
+    const subject = totals[1].trim();
+    const isMatch = /^match$/i.test(subject);
     return {
-      kind: 'total',
-      metric: current[1].toLowerCase(),
-      direction: current[2].toLowerCase() as 'over' | 'under',
-      line: Number(current[3]),
+      kind: isMatch ? 'matchTotal' : 'teamTotal',
+      subject: isMatch ? undefined : subject,
+      metric: totals[2].toLowerCase(),
+      direction: totals[3].toLowerCase() as 'over' | 'under',
+      line: Number(totals[4]),
     };
   }
 
+  // Legacy match totals: "Over 2.5 Goals"
   const legacy = /^(Over|Under)\s+([\d.]+)\s+(Goals|Corners|Cards)/i.exec(n);
   if (legacy) {
     return {
-      kind: 'total',
+      kind: 'matchTotal',
       metric: legacy[3].toLowerCase(),
       direction: legacy[1].toLowerCase() as 'over' | 'under',
       line: Number(legacy[2]),
@@ -69,9 +78,33 @@ function parse(name: string): Parsed {
   return { kind: 'unknown' };
 }
 
+/** "goals" -> "scores", for a team subject. */
+function teamTotalPhrase(subject: string, metric: string, direction: string, line: number): string {
+  const goals = metric === 'goals';
+
+  if (direction === 'over') {
+    const atLeast = Math.ceil(line);
+    if (goals) {
+      return atLeast === 1
+        ? `${subject} scores at least once`
+        : `${subject} scores ${atLeast} or more`;
+    }
+    return `${subject} takes ${atLeast} or more ${metric}`;
+  }
+
+  const atMost = Math.floor(line);
+  if (goals) {
+    if (atMost === 0) return `${subject} fails to score`;
+    if (atMost === 1) return `${subject} scores at most once`;
+    return `${subject} scores ${atMost} or fewer`;
+  }
+  return `${subject} takes ${atMost} or fewer ${metric}`;
+}
+
 /**
  * One line naming both the outcome and who it is about.
- * e.g. "More than 2.5 goals in the match (both teams combined)".
+ * e.g. "More than 2.5 goals in the match (both teams combined)",
+ *      "Arsenal scores at least once (full match)".
  */
 export function describeMarket(
   marketName: string,
@@ -79,7 +112,11 @@ export function describeMarket(
 ): string {
   const p = parse(marketName);
 
-  if (p.kind === 'total' && p.metric && p.direction && p.line !== undefined) {
+  if (p.kind === 'teamTotal' && p.subject && p.metric && p.direction && p.line !== undefined) {
+    return `${teamTotalPhrase(p.subject, p.metric, p.direction, p.line)} (full match)`;
+  }
+
+  if (p.kind === 'matchTotal' && p.metric && p.direction && p.line !== undefined) {
     const word = p.direction === 'over' ? 'More than' : 'Fewer than';
     return `${word} ${p.line} ${p.metric} in the match (both teams combined)`;
   }

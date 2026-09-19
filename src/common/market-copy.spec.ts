@@ -28,6 +28,47 @@ describe('describeMarket', () => {
     );
   });
 
+  // Team totals are the betable form of an "over 0.5": the client's point was
+  // that over 0.5 on the match total is barely priced, while over 0.5 for one
+  // team is a real market.
+  describe('team totals', () => {
+    it('reads over 0.5 as the team scoring', () => {
+      expect(describeMarket('Arsenal Goals: Over 0.5', fixture)).toBe(
+        'Arsenal scores at least once (full match)',
+      );
+    });
+
+    it('reads over 1.5 as two or more', () => {
+      expect(describeMarket('Man City Goals: Over 1.5', fixture)).toBe(
+        'Man City scores 2 or more (full match)',
+      );
+    });
+
+    it('reads under 0.5 as failing to score', () => {
+      expect(describeMarket('Arsenal Goals: Under 0.5', fixture)).toBe(
+        'Arsenal fails to score (full match)',
+      );
+    });
+
+    it('reads under 1.5 as at most once', () => {
+      expect(describeMarket('Arsenal Goals: Under 1.5', fixture)).toBe(
+        'Arsenal scores at most once (full match)',
+      );
+    });
+
+    it('does not mistake a match total for a team total', () => {
+      expect(describeMarket('Match Goals: Over 1.5', fixture)).toBe(
+        'More than 1.5 goals in the match (both teams combined)',
+      );
+    });
+
+    it('handles a club whose name contains the word Match', () => {
+      expect(describeMarket('Matchroom FC Goals: Over 0.5', fixture)).toBe(
+        'Matchroom FC scores at least once (full match)',
+      );
+    });
+  });
+
   it('names the club on a result market', () => {
     expect(describeMarket('Arsenal to Win', fixture)).toBe('Arsenal wins the match (90 minutes)');
   });
@@ -43,10 +84,10 @@ describe('describeMarket', () => {
 
   it('covers draw and both-teams-to-score', () => {
     expect(describeMarket('Draw', fixture)).toBe('The match ends level (90 minutes)');
-    expect(describeMarket('Both Teams to Score - Yes', fixture)).toBe(
+    expect(describeMarket('Both Teams to Score — Yes', fixture)).toBe(
       'Both teams score at least once (full match)',
     );
-    expect(describeMarket('Both Teams to Score - No', fixture)).toBe(
+    expect(describeMarket('Both Teams to Score — No', fixture)).toBe(
       'At least one team fails to score (full match)',
     );
   });
