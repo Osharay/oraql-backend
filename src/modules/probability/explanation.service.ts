@@ -122,7 +122,15 @@ export class ExplanationService {
     }
 
     const avgGoals = factors.avgGoals || (homeStats.avgGoalsScored + awayStats.avgGoalsScored);
-    return `${market.name} is estimated at ${prob}%. Combined, both teams average ${avgGoals.toFixed(1)} goals per match — ${ctx.homeTeamName} averages ${homeStats.avgGoalsScored} and ${ctx.awayTeamName} averages ${awayStats.avgGoalsScored} from their last ${Math.min(homeStats.matchCount, awayStats.matchCount)} games.`;
+    const games = Math.min(homeStats.matchCount, awayStats.matchCount);
+
+    // Saying "from their last 0 games" while showing a confident percentage is
+    // how a default constant gets mistaken for analysis.
+    if (games === 0) {
+      return `${market.name} is estimated at ${prob}%, but no completed matches have been recorded for these teams yet. This figure comes from league-average assumptions, not from either side's form.`;
+    }
+
+    return `${market.name} covers the combined score of the whole match, not either team on its own. Estimated at ${prob}%: together the two sides average ${avgGoals.toFixed(1)} goals per match — ${ctx.homeTeamName} ${homeStats.avgGoalsScored} and ${ctx.awayTeamName} ${awayStats.avgGoalsScored} across their last ${games} ${games === 1 ? 'game' : 'games'}.`;
   }
 
   private explainCorners(
@@ -154,6 +162,12 @@ export class ExplanationService {
     awayStats: TeamStats,
     ctx: ExplanationContext,
   ): string {
-    return `${market.name} has a ${(market.probability * 100).toFixed(0)}% estimated probability based on analysis of the last ${Math.min(homeStats.matchCount, awayStats.matchCount)} matches for both teams.`;
+    const games = Math.min(homeStats.matchCount, awayStats.matchCount);
+
+    if (games === 0) {
+      return `${market.name} is estimated at ${(market.probability * 100).toFixed(0)}%, based on league-average assumptions — no completed matches have been recorded for these teams yet.`;
+    }
+
+    return `${market.name} has a ${(market.probability * 100).toFixed(0)}% estimated probability, based on the last ${games} ${games === 1 ? 'match' : 'matches'} for both teams.`;
   }
 }

@@ -26,6 +26,13 @@ export class ProbabilityService {
   /** Recency weighting: most recent match gets this multiplier vs oldest */
   private readonly RECENCY_WEIGHT_MAX = 2.0;
 
+  /**
+   * Matches of history required before any market is published for an event.
+   * Below this the numbers come from default constants rather than from the
+   * teams in question.
+   */
+  private readonly MIN_HISTORY_FOR_MARKETS = 3;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly marketsService: MarketsService,
@@ -72,6 +79,21 @@ export class ProbabilityService {
     // Check if lineups are confirmed
     const hasLineups = event.lineups.some((l) => l.isConfirmed);
 
+    // With no match history the engine falls back to default averages, which
+    // are the SAME constants for every team on earth. That produces confident
+    // numbers — an identical 92.6% for "Over 0.5 Goals" on any fixture — that
+    // describe nothing. Publishing those is worse than publishing nothing, so
+    // below the floor no markets are written at all.
+    const history = Math.min(homeStats.matchCount, awayStats.matchCount);
+    if (history < this.MIN_HISTORY_FOR_MARKETS) {
+      this.logger.warn(
+        `Event ${eventId} skipped: only ${history} matches of history for the weaker side ` +
+          `(need ${this.MIN_HISTORY_FOR_MARKETS}). No markets published.`,
+      );
+      await this.prisma.market.deleteMany({ where: { eventId } });
+      return;
+    }
+
     // ─── Compute each market category ───
     const markets: Array<{
       category: MarketCategory;
@@ -84,8 +106,19 @@ export class ProbabilityService {
       explanationFactors: Prisma.JsonObject;
     }> = [];
 
+    const teams = {
+      home: event.homeTeam.shortName || event.homeTeam.name,
+      away: event.awayTeam.shortName || event.awayTeam.name,
+    };
+
     // Match Result (1X2)
-    const matchResult = this.computeMatchResult(homeStats, awayStats, homeInjuries, awayInjuries);
+    const matchResult = this.computeMatchResult(
+      homeStats,
+      awayStats,
+      homeInjuries,
+      awayInjuries,
+      teams,
+    );
     markets.push(...matchResult);
 
     // Goals Markets
@@ -174,6 +207,7 @@ export class ProbabilityService {
     awayStats: TeamHistoryStats,
     homeInjuries: InjuryInfo[],
     awayInjuries: InjuryInfo[],
+    teams: { home: string; away: string },
   ) {
     const homeWinRate = homeStats.winRate;
     const awayWinRate = awayStats.winRate;
@@ -194,7 +228,7 @@ export class ProbabilityService {
     return [
       {
         category: MarketCategory.MATCH_RESULT,
-        name: 'Home Win',
+        name: `${teams.home} to Win`,
         shortName: '1',
         probability: homeProb,
         confidence,
@@ -212,7 +246,7 @@ export class ProbabilityService {
       },
       {
         category: MarketCategory.MATCH_RESULT,
-        name: 'Away Win',
+        name: `${teams.away} to Win`,
         shortName: '2',
         probability: awayProb,
         confidence,
@@ -234,7 +268,7 @@ export class ProbabilityService {
 
       markets.push({
         category: MarketCategory.GOALS,
-        name: `Over ${line} Goals`,
+        name: `Match Goals: Over ${line}`,
         shortName: `O${line}`,
         line,
         probability: overProb,
@@ -249,7 +283,7 @@ export class ProbabilityService {
 
       markets.push({
         category: MarketCategory.GOALS,
-        name: `Under ${line} Goals`,
+        name: `Match Goals: Under ${line}`,
         shortName: `U${line}`,
         line,
         probability: 1 - overProb,
@@ -275,7 +309,7 @@ export class ProbabilityService {
 
       markets.push({
         category: MarketCategory.CORNERS,
-        name: `Over ${line} Corners`,
+        name: `Match Corners: Over ${line}`,
         shortName: `O${line}C`,
         line,
         probability: overProb,
@@ -290,7 +324,7 @@ export class ProbabilityService {
 
       markets.push({
         category: MarketCategory.CORNERS,
-        name: `Under ${line} Corners`,
+        name: `Match Corners: Under ${line}`,
         shortName: `U${line}C`,
         line,
         probability: 1 - overProb,
@@ -317,7 +351,7 @@ export class ProbabilityService {
 
       markets.push({
         category: MarketCategory.CARDS,
-        name: `Over ${line} Cards`,
+        name: `Match Cards: Over ${line}`,
         shortName: `O${line}K`,
         line,
         probability: overProb,
@@ -330,7 +364,7 @@ export class ProbabilityService {
 
       markets.push({
         category: MarketCategory.CARDS,
-        name: `Under ${line} Cards`,
+        name: `Match Cards: Under ${line}`,
         shortName: `U${line}K`,
         line,
         probability: 1 - overProb,
