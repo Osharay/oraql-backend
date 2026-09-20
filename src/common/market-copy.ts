@@ -137,3 +137,64 @@ export function describeMarket(
 
   return marketName;
 }
+
+// ─── Streak markets ───
+//
+// The streak registry names markets generically — "Team To Win", "Draw No
+// Bet", "Team Under 1.5 Goals" — because one definition is evaluated for
+// whichever side it is measured on. Displayed as-is against a fixture, that
+// reads as though it covers both clubs, and a client asked which team the
+// draw-no-bet belonged to. Only one can be selected for it.
+//
+// A candidate's `selection` cannot answer that: it is null for venue-agnostic
+// slices, which is most of them. The market's scope and the candidate's
+// entity answer it instead.
+
+export type MarketScopeName = 'TEAM' | 'MATCH';
+
+export interface MarketSubject {
+  scope: MarketScopeName;
+  /** The club, when the market is about one. */
+  team: string | null;
+  /** One line stating who the figure covers. */
+  label: string;
+}
+
+/**
+ * The market named for the club it applies to.
+ * "Team To Win" + Marseille -> "Marseille To Win"
+ * "Draw No Bet" + Marseille -> "Marseille — Draw No Bet"
+ */
+export function streakMarketLabel(
+  displayName: string,
+  scope: MarketScopeName,
+  teamName?: string | null,
+): string {
+  if (scope !== 'TEAM' || !teamName) return displayName;
+
+  // Most team markets are written with a literal "Team" placeholder.
+  if (/^team\b/i.test(displayName)) {
+    return displayName.replace(/^team\b/i, teamName);
+  }
+  if (/\bteam\b/i.test(displayName)) {
+    return displayName.replace(/\bteam\b/i, teamName);
+  }
+  // The rest name an outcome with no placeholder, so say whose it is.
+  return `${teamName} — ${displayName}`;
+}
+
+/**
+ * Who the figure covers, stated rather than implied.
+ */
+export function marketSubjectOf(
+  scope: MarketScopeName,
+  teamName?: string | null,
+): MarketSubject {
+  if (scope === 'TEAM' && teamName) {
+    return { scope, team: teamName, label: `${teamName} only — not the match total` };
+  }
+  if (scope === 'TEAM') {
+    return { scope, team: null, label: 'One team only — not the match total' };
+  }
+  return { scope: 'MATCH', team: null, label: 'Both teams combined — match total' };
+}

@@ -47,6 +47,23 @@ const yn = (b: boolean): Outcome => (b ? 'WIN' : 'LOSS');
 const asianHalfLine = (o: MatchOutcome, side: Selection, handicap: number): Outcome =>
   yn(teamGoals(o, side) + handicap > oppGoals(o, side));
 
+/**
+ * Whether a market is about one club or about the match as a whole.
+ *
+ * A market whose selections are HOME/AWAY is resolved for one side: only one
+ * team can be picked for Draw No Bet, and "Team Under 1.5 Goals" is that
+ * team's goals, not the match total. A market whose only selection is MATCH
+ * covers both teams combined. Nothing should have to infer this from a
+ * candidate's `selection`, which is null for venue-agnostic slices.
+ */
+export type MarketScope = 'TEAM' | 'MATCH';
+
+export function marketScope(marketId: string): MarketScope {
+  const spec = MARKET_DEFINITIONS.find((m) => m.marketId === marketId);
+  if (!spec) return 'MATCH';
+  return spec.selections.includes('MATCH') ? 'MATCH' : 'TEAM';
+}
+
 export const MARKET_DEFINITIONS: MarketDefinitionSpec[] = [
   // ─── Team goals ───
   {

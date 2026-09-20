@@ -12,6 +12,8 @@ import {
   benjaminiHochberg,
   streakLengths,
 } from './stats.util';
+import { marketScope } from './market-definitions';
+import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
 
 type Venue = 'ALL' | 'HOME' | 'AWAY';
 
@@ -591,9 +593,9 @@ export class CandidatesService {
    * which team the "over 0.5" belonged to. Resolve the name here, once, so
    * no surface has to guess.
    */
-  private async attachEntities<T extends { entityType: string; entityId: string }>(
-    candidates: T[],
-  ): Promise<(T & { entity: { id: string; type: string; name: string; shortName: string | null } | null })[]> {
+  private async attachEntities<
+    T extends { entityType: string; entityId: string },
+  >(candidates: T[]): Promise<Array<T & Record<string, unknown>>> {
     const teamIds = candidates.filter((c) => c.entityType === 'TEAM').map((c) => c.entityId);
     const leagueIds = candidates.filter((c) => c.entityType === 'LEAGUE').map((c) => c.entityId);
 
@@ -616,7 +618,25 @@ export class CandidatesService {
     for (const t of teams) byId.set(t.id, { id: t.id, type: 'TEAM', name: t.name, shortName: t.shortName ?? null });
     for (const l of leagues) byId.set(l.id, { id: l.id, type: 'LEAGUE', name: l.name, shortName: null });
 
-    return candidates.map((c) => ({ ...c, entity: byId.get(c.entityId) ?? null }));
+    return candidates.map((c) => {
+      const entity = byId.get(c.entityId) ?? null;
+      const marketId = (c as unknown as { marketDefinition?: { marketId?: string } })
+        .marketDefinition?.marketId;
+      const scope = marketId ? marketScope(marketId) : 'MATCH';
+      const displayName = (c as unknown as { marketDefinition?: { displayName?: string } })
+        .marketDefinition?.displayName;
+      const teamName = entity?.type === 'TEAM' ? entity.name : null;
+
+      return {
+        ...c,
+        entity,
+        // Decided here so no surface has to guess from `selection`, which is
+        // null for venue-agnostic slices and therefore cannot say whether a
+        // market covers one club or the match.
+        marketLabel: displayName ? streakMarketLabel(displayName, scope, teamName) : undefined,
+        subject: marketSubjectOf(scope, teamName),
+      };
+    });
   }
 
   /** Survivors of the most recent completed run, strongest first. */

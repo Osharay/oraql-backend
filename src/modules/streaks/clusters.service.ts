@@ -7,6 +7,8 @@ import {
   MIN_CLUSTER_SIZE,
   type Selectable,
 } from './cluster-selection';
+import { marketScope } from './market-definitions';
+import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
 
 /**
  * Cluster assembly.
@@ -167,6 +169,7 @@ export class ClustersService {
                 streakCandidate: {
                   select: {
                     selection: true,
+                    entityType: true,
                     entityId: true,
                     marketDefinition: {
                       select: { marketId: true, displayName: true, shortName: true },
@@ -181,11 +184,50 @@ export class ClustersService {
       orderBy: { combinedProbability: 'desc' },
     });
 
+    // Name the club each component is about. A team market read against a
+    // fixture otherwise looks like it covers both sides — only one team can
+    // be selected for a draw no bet, and the card has to say which.
+    const teamIds = new Set<string>();
+    for (const cluster of clusters) {
+      for (const c of cluster.components) {
+        const sc = c.snapshot.streakCandidate;
+        if (sc.entityType === 'TEAM') teamIds.add(sc.entityId);
+      }
+    }
+
+    const teams = teamIds.size
+      ? await this.prisma.team.findMany({
+          where: { id: { in: [...teamIds] } },
+          select: { id: true, name: true, shortName: true },
+        })
+      : [];
+    const teamName = new Map<string, string>(
+      teams.map((t) => [t.id, String(t.shortName || t.name)]),
+    );
+
+    const decorated = clusters.map((cluster) => ({
+      ...cluster,
+      components: cluster.components.map((c) => {
+        const sc = c.snapshot.streakCandidate;
+        const scope = marketScope(sc.marketDefinition.marketId);
+        const name = sc.entityType === 'TEAM' ? (teamName.get(sc.entityId) ?? null) : null;
+
+        return {
+          ...c,
+          snapshot: {
+            ...c.snapshot,
+            marketLabel: streakMarketLabel(sc.marketDefinition.displayName, scope, name),
+            subject: marketSubjectOf(scope, name),
+          },
+        };
+      }),
+    }));
+
     return {
       date: start.toISOString().slice(0, 10),
       caveat:
         'Combined probability is the product of component hit rates and assumes independence. Components are historical records, not predictions.',
-      clusters,
+      clusters: decorated,
     };
   }
 
