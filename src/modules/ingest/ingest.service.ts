@@ -7,6 +7,7 @@ import { ApiFootballAdapter } from './adapters/api-football.adapter';
 import { OddsApiAdapter } from './adapters/odds-api.adapter';
 import { EventStatus, IngestJobStatus } from '@prisma/client';
 import { FixtureData } from './interfaces/data-provider.interface';
+import { trackedLeagueIds } from '@/config/app.config';
 
 @Injectable()
 export class IngestService {
@@ -99,7 +100,16 @@ export class IngestService {
     const job = await this.createJobRecord('api_football', 'daily_fixtures');
 
     try {
-      const fixtures = await this.apiFootball.getFixtures(date);
+      const all = await this.apiFootball.getFixtures(date);
+
+      // Keep only the competitions we actually track. Everything downstream is
+      // rate-limited per team, so a worldwide fixture list does not mean more
+      // coverage — it means none of it is deep enough to use.
+      const tracked = trackedLeagueIds();
+      const fixtures = tracked.length
+        ? all.filter((f) => tracked.includes(String(f.leagueExternalId)))
+        : all;
+
       let processed = 0;
 
       for (const fixture of fixtures) {
@@ -108,7 +118,10 @@ export class IngestService {
       }
 
       await this.updateJobRecord(job.id, IngestJobStatus.COMPLETED, processed);
-      this.logger.log(`Ingested ${processed} fixtures for ${date}`);
+      this.logger.log(
+        `Ingested ${processed} fixtures for ${date}` +
+          (tracked.length ? ` (${all.length - fixtures.length} outside tracked leagues)` : ''),
+      );
       return processed;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -355,6 +368,47 @@ export class IngestService {
    * Events kicking off in the given window — used to gate odds polling and to
    * decide which events are worth recomputing.
    */
+  /**
+   * Events in the window whose BOTH teams have enough match history for the
+   * probability engine to say anything. Without this the sweep queued a job
+   * for every fixture in the window and the engine skipped nearly all of
+   * them, one warning at a time.
+   */
+  async getEventsReadyForCompute(withinHours: number, minHistory = 3) {
+    const events = await this.getEventsInWindow(withinHours);
+    if (events.length === 0) return [];
+
+    const withTeams = await this.prisma.event.findMany({
+      where: { id: { in: events.map((e) => e.id) } },
+      select: { id: true, homeTeamId: true, awayTeamId: true },
+    });
+
+    const teamIds = Array.from(
+      new Set(withTeams.flatMap((e) => [e.homeTeamId, e.awayTeamId])),
+    );
+
+    const counts = await this.prisma.matchStats.groupBy({
+      by: ['teamId'],
+      where: { teamId: { in: teamIds } },
+      _count: { _all: true },
+    });
+
+    const history = new Map<string, number>(
+      counts.map((c) => [c.teamId, Number(c._count?._all ?? 0)]),
+    );
+    const ready = new Set(
+      withTeams
+        .filter(
+          (e) =>
+            (history.get(e.homeTeamId) ?? 0) >= minHistory &&
+            (history.get(e.awayTeamId) ?? 0) >= minHistory,
+        )
+        .map((e) => e.id),
+    );
+
+    return events.filter((e) => ready.has(e.id));
+  }
+
   async getEventsInWindow(withinHours: number) {
     return this.prisma.event.findMany({
       where: {

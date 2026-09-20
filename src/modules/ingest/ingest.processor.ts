@@ -86,8 +86,10 @@ export class IngestProcessor {
 
     this.logger.log(`Team stats sweep: ${synced} synced, ${skipped} still fresh`);
 
-    // Now that history exists, compute probabilities for upcoming events.
-    const events = await this.ingestService.getEventsInWindow(72);
+    // Now that history exists, compute probabilities — but only for events
+    // whose teams actually have some. Queueing the rest produced one skip
+    // warning per fixture and no markets.
+    const events = await this.ingestService.getEventsReadyForCompute(72);
     for (const event of events) {
       await this.ingestQueue.add(
         'compute-probabilities',
@@ -106,6 +108,34 @@ export class IngestProcessor {
    * Nothing called computeForEvent before this, so no Market or Pick rows were
    * ever created and every user-facing list came back empty.
    */
+  /**
+   * Seasons of fixtures for the chosen leagues. One provider request per
+   * league-season, scores only.
+   */
+  @Process('backfill-history')
+  async handleBackfill(job: Job<{ leagues: string[]; seasons: number[] }>) {
+    const { leagues = [], seasons = [] } = job.data ?? {};
+    const total = leagues.length * seasons.length;
+    const results = [];
+    let done = 0;
+
+    for (const league of leagues) {
+      for (const season of seasons) {
+        results.push(await this.ingestService.backfillLeagueSeason(league, season));
+        done++;
+        await job.progress(Math.round((done / Math.max(total, 1)) * 100));
+      }
+    }
+
+    const fixtures = results.reduce((n, r) => n + r.fixtures, 0);
+    const finished = results.reduce((n, r) => n + r.finished, 0);
+    this.logger.log(
+      `Backfill complete: ${results.length} league-seasons, ${fixtures} fixtures, ${finished} finished`,
+    );
+
+    return { requests: results.length, fixtures, finished, results };
+  }
+
   @Process('compute-probabilities')
   async handleComputeProbabilities(job: Job<{ eventId: string }>) {
     const { eventId } = job.data;

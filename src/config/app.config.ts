@@ -30,6 +30,27 @@ export const frontendUrl = (): string => {
   return first.replace(/\/$/, '');
 };
 
+/**
+ * Provider league ids the daily fixture ingest keeps.
+ *
+ * Without this the ingest pulled every fixture worldwide, which spread the
+ * work far too thin: the team-history sweep is capped at 40 teams a run, so
+ * with thousands of clubs in the window almost none ever got history, and the
+ * probability engine skipped nearly every event for want of it. Set
+ * TRACKED_LEAGUE_IDS to widen or narrow the list; empty means no filter.
+ *
+ * Defaults to the same six competitions the odds refresh already polls:
+ * Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Champions League.
+ */
+export const trackedLeagueIds = (): string[] => {
+  const raw = process.env.TRACKED_LEAGUE_IDS;
+  if (raw === '') return [];
+  return (raw ?? '39,140,78,135,61,2')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+};
+
 export const jwtConfig = registerAs('jwt', () => ({
   secret: process.env.JWT_SECRET || 'dev-secret-change-me',
   accessExpiration: process.env.JWT_ACCESS_EXPIRATION || '15m',

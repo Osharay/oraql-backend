@@ -49,25 +49,27 @@ export class IngestController {
   async backfill(
     @Body() body: { leagues: string[]; seasons: number[] },
   ) {
-
     const leagues = body?.leagues ?? [];
     const seasons = body?.seasons ?? [];
     if (!leagues.length || !seasons.length) {
       return { error: 'Provide leagues (provider ids) and seasons' };
     }
 
-    const results = [];
-    for (const league of leagues) {
-      for (const season of seasons) {
-        results.push(await this.ingestService.backfillLeagueSeason(league, season));
-      }
-    }
+    // Queued, not awaited. A full backfill is one provider call plus a few
+    // hundred upserts per league-season — minutes of work — and holding the
+    // HTTP connection open for it meant the browser saw the connection
+    // closed and reported "Failed to fetch" while the work carried on.
+    const job = await this.ingestQueue.add(
+      'backfill-history',
+      { leagues, seasons },
+      { attempts: 1 },
+    );
 
     return {
-      requests: results.length,
-      fixtures: results.reduce((n, r) => n + r.fixtures, 0),
-      finished: results.reduce((n, r) => n + r.finished, 0),
-      results,
+      queued: 'backfill-history',
+      jobId: job.id,
+      leagueSeasons: leagues.length * seasons.length,
+      note: 'Running in the background. Watch the deploy logs, or re-run the engine steps once it finishes.',
     };
   }
 
