@@ -117,7 +117,22 @@ export class AuthService {
   /**
    * Refresh the access token using a valid refresh token.
    */
-  async refreshTokens(userId: string, refreshToken: string): Promise<TokenPair> {
+  async refreshTokens(refreshToken: string, fallbackUserId?: string): Promise<TokenPair> {
+    // The refresh token names its own subject, so the caller does not have to.
+    // Requiring a userId from the client meant the frontend could not refresh
+    // at all — the login response does not include one — which is why sessions
+    // were ending at the access token's 15 minutes.
+    let userId: string;
+    try {
+      const payload = await this.jwtService.verifyAsync<JwtPayload>(refreshToken);
+      userId = payload.sub;
+    } catch {
+      if (!fallbackUserId) {
+        throw new UnauthorizedException('Invalid refresh token');
+      }
+      userId = fallbackUserId;
+    }
+
     const user = await this.usersService.findById(userId);
     if (!user || !user.refreshToken) {
       throw new UnauthorizedException('Access denied');

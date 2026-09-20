@@ -19,6 +19,7 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { Public } from '@/common/decorators/public.decorator';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { frontendUrl } from '@/config/app.config';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -65,9 +66,13 @@ export class AuthController {
     const tokens = await this.authService.handleGoogleAuth(user);
 
     // Redirect to frontend with tokens (via query params or cookie)
-    const frontendUrl = process.env.CORS_ORIGINS || 'http://localhost:3000';
+    // NOTE: tokens ride in the query string, so they land in browser history
+    // and in any referrer. The callback page strips them immediately, but this
+    // should become a short-lived one-time code before the product is public.
     res.redirect(
-      `${frontendUrl}/auth/callback?accessToken=${tokens.accessToken}&refreshToken=${tokens.refreshToken}`,
+      `${frontendUrl()}/auth/callback` +
+        `?accessToken=${encodeURIComponent(tokens.accessToken)}` +
+        `&refreshToken=${encodeURIComponent(tokens.refreshToken)}`,
     );
   }
 
@@ -76,7 +81,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Refresh access token' })
   async refreshTokens(@Body() dto: RefreshTokenDto) {
-    return this.authService.refreshTokens(dto.userId, dto.refreshToken);
+    return this.authService.refreshTokens(dto.refreshToken, dto.userId);
   }
 
   @Post('logout')

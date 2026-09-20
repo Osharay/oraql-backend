@@ -17,6 +17,19 @@ export const redisConfig = registerAs('redis', () => ({
   password: process.env.REDIS_PASSWORD || undefined,
 }));
 
+/**
+ * Where to send a browser after an OAuth round trip. CORS_ORIGINS is a
+ * comma-separated list, so using it whole as a URL produced a redirect to
+ * "https://a.app,http://localhost:3000/auth/callback". Prefer an explicit
+ * FRONTEND_URL and fall back to the first origin in the list.
+ */
+export const frontendUrl = (): string => {
+  const explicit = process.env.FRONTEND_URL?.trim();
+  if (explicit) return explicit.replace(/\/$/, '');
+  const first = (process.env.CORS_ORIGINS || 'http://localhost:3000').split(',')[0].trim();
+  return first.replace(/\/$/, '');
+};
+
 export const jwtConfig = registerAs('jwt', () => ({
   secret: process.env.JWT_SECRET || 'dev-secret-change-me',
   accessExpiration: process.env.JWT_ACCESS_EXPIRATION || '15m',
