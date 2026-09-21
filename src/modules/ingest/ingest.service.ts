@@ -7,7 +7,7 @@ import { ApiFootballAdapter, ApiFootballQuotaExhausted } from './adapters/api-fo
 import { OddsApiAdapter } from './adapters/odds-api.adapter';
 import { EventStatus, IngestJobStatus, Prisma } from '@prisma/client';
 import { FixtureData } from './interfaces/data-provider.interface';
-import { trackedLeagueIds } from '@/config/app.config';
+import { trackedLeagueIds, oddsPollingEnabled } from '@/config/app.config';
 
 @Injectable()
 export class IngestService {
@@ -47,6 +47,11 @@ export class IngestService {
    */
   @Cron('*/30 * * * *', { name: 'odds-refresh', timeZone: 'UTC' })
   async scheduleOddsRefresh() {
+    if (!oddsPollingEnabled()) {
+      this.logger.debug('Odds refresh skipped — ODDS_POLLING_ENABLED is not true');
+      return;
+    }
+
     const upcoming = await this.getEventsInWindow(this.ODDS_WINDOW_HOURS);
 
     if (upcoming.length === 0) {

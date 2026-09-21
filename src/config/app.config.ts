@@ -51,6 +51,18 @@ export const trackedLeagueIds = (): string[] => {
     .filter(Boolean);
 };
 
+/**
+ * Whether to poll The Odds API. Off unless ODDS_POLLING_ENABLED=true.
+ *
+ * Nothing consumes the odds yet: market.impliedProbability is never written,
+ * so value-bet flags cannot be set, and until picks are publishing there is
+ * nothing to attach a price to. Polling meanwhile spent Odds API credits and
+ * appended rows to a table nothing read. Turn it back on once the prices feed
+ * snapshots (oddsAtCapture) and markets.
+ */
+export const oddsPollingEnabled = (): boolean =>
+  (process.env.ODDS_POLLING_ENABLED ?? '').trim().toLowerCase() === 'true';
+
 export const jwtConfig = registerAs('jwt', () => ({
   secret: process.env.JWT_SECRET || 'dev-secret-change-me',
   accessExpiration: process.env.JWT_ACCESS_EXPIRATION || '15m',

@@ -3,6 +3,7 @@ import { InjectQueue } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
 import { Job, Queue } from 'bull';
 import { IngestService } from './ingest.service';
+import { oddsPollingEnabled } from '@/config/app.config';
 import { ApiFootballQuotaExhausted } from './adapters/api-football.adapter';
 import { ProbabilityService } from '@/modules/probability/probability.service';
 
@@ -170,6 +171,13 @@ export class IngestProcessor {
 
   @Process('odds-refresh')
   async handleOddsRefresh(job: Job) {
+    // Checked here as well as in the cron, so a job queued before the switch
+    // was turned off, or added by hand, still spends nothing.
+    if (!oddsPollingEnabled()) {
+      this.logger.log('Odds refresh skipped — ODDS_POLLING_ENABLED is not true');
+      return { skipped: true };
+    }
+
     this.logger.log('Processing odds refresh...');
 
     const sportKeys = [
