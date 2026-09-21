@@ -1,4 +1,4 @@
-import { Controller, Post, Body, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, Req, UseGuards, BadRequestException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
@@ -23,6 +23,24 @@ export class IngestController {
     @InjectQueue('ingest') private readonly ingestQueue: Queue,
   ) {}
 
+
+  @Get('settings/odds-polling')
+  @ApiOperation({ summary: 'Whether odds polling is on, and whether an admin or the default decided' })
+  async getOddsPolling() {
+    return this.ingestService.getOddsPolling();
+  }
+
+  @Post('settings/odds-polling')
+  @ApiOperation({ summary: 'Turn odds polling on or off. On spends Odds API credits.' })
+  async setOddsPolling(
+    @Body() body: { enabled?: boolean },
+    @Req() req: { user?: { email?: string } },
+  ) {
+    if (typeof body?.enabled !== 'boolean') {
+      throw new BadRequestException('Send { "enabled": true } or { "enabled": false }');
+    }
+    return this.ingestService.setOddsPolling(body.enabled, req.user?.email);
+  }
 
   @Post('run')
   @ApiOperation({ summary: 'Run the full ingest chain now (fixtures → stats → probabilities)' })

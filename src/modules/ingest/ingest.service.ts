@@ -23,6 +23,40 @@ export class IngestService {
     @InjectQueue('ingest') private readonly ingestQueue: Queue,
   ) {}
 
+  /** Redis key for the admin's odds switch. */
+  private static readonly ODDS_SWITCH_KEY = 'oraql:settings:odds-polling';
+
+  /**
+   * Whether odds polling is on, and who decided.
+   *
+   * An admin can flip it from Engine controls; that choice is kept in Redis,
+   * which the queue already depends on, so no migration is needed. With no
+   * admin choice recorded — or if Redis is unreachable or was cleared — the
+   * ODDS_POLLING_ENABLED env var decides, and that defaults to off. Every
+   * failure lands on "off", which spends nothing.
+   */
+  async getOddsPolling(): Promise<{ enabled: boolean; source: 'admin' | 'default' }> {
+    try {
+      const client = await this.ingestQueue.client;
+      const stored = await client.get(IngestService.ODDS_SWITCH_KEY);
+      if (stored === 'on' || stored === 'off') {
+        return { enabled: stored === 'on', source: 'admin' };
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Could not read the odds switch; using the default: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+    return { enabled: oddsPollingEnabled(), source: 'default' };
+  }
+
+  async setOddsPolling(enabled: boolean, by?: string) {
+    const client = await this.ingestQueue.client;
+    await client.set(IngestService.ODDS_SWITCH_KEY, enabled ? 'on' : 'off');
+    this.logger.log(`Odds polling turned ${enabled ? 'ON' : 'OFF'}${by ? ` by ${by}` : ''}`);
+    return this.getOddsPolling();
+  }
+
   /**
    * Daily data refresh — runs at 04:00 UTC.
    * Pulls fixtures, stats, injuries for the next 7 days.
@@ -47,8 +81,8 @@ export class IngestService {
    */
   @Cron('*/30 * * * *', { name: 'odds-refresh', timeZone: 'UTC' })
   async scheduleOddsRefresh() {
-    if (!oddsPollingEnabled()) {
-      this.logger.debug('Odds refresh skipped — ODDS_POLLING_ENABLED is not true');
+    if (!(await this.getOddsPolling()).enabled) {
+      this.logger.debug('Odds refresh skipped — odds polling is off');
       return;
     }
 
