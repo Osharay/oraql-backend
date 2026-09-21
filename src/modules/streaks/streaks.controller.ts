@@ -40,11 +40,15 @@ export class StreaksController {
 
   @Post('observations/derive')
   @UseGuards(AdminGuard)
-  @ApiOperation({ summary: 'Derive observations for finished events that have none' })
+  @ApiOperation({
+    summary:
+      'Derive observations for finished events, topping up any missing markets or now-settleable half-time results',
+  })
   async derive(@Query('limit') limit?: string) {
     const parsed = Number(limit);
     return this.observations.deriveForFinishedEvents(
-      Number.isFinite(parsed) && parsed > 0 ? parsed : 200,
+      Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 2000) : 500,
+      { refresh: true },
     );
   }
 

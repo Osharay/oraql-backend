@@ -169,6 +169,10 @@ export class ApiFootballAdapter implements IDataProvider {
       status: this.mapStatus(f.fixture.status.short),
       homeScore: f.goals.home,
       awayScore: f.goals.away,
+      htHomeScore: f.score?.halftime?.home ?? null,
+      htAwayScore: f.score?.halftime?.away ?? null,
+      ftHomeScore: f.score?.fulltime?.home ?? null,
+      ftAwayScore: f.score?.fulltime?.away ?? null,
       league: {
         name: f.league.name,
         country: f.league.country,

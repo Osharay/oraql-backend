@@ -47,7 +47,9 @@ export class StreaksScheduler {
     this.logger.log('Streak engine cycle starting');
 
     try {
-      const derived = await this.observations.deriveForFinishedEvents(500);
+      // The daily run also tops up older matches with markets added since
+      // they were derived; the half-hourly settlement run stays cheap.
+      const derived = await this.observations.deriveForFinishedEvents(500, { refresh: true });
       const baselines = await this.baselines.computeAll();
       const run = await this.candidates.runEngine();
       const captured = await this.snapshots.captureForUpcoming();

@@ -16,6 +16,15 @@ export interface FixtureData {
   status: string;
   homeScore?: number;
   awayScore?: number;
+  /**
+   * Half-time and full-time scores. The provider sends these in the same
+   * fixture payload the backfill already downloads; they were being thrown
+   * away, which left every half-time market impossible to settle.
+   */
+  htHomeScore?: number | null;
+  htAwayScore?: number | null;
+  ftHomeScore?: number | null;
+  ftAwayScore?: number | null;
 
   /**
    * Names carried on the fixture payload itself. Providers return these

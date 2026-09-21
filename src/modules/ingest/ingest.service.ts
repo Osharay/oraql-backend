@@ -303,12 +303,24 @@ export class IngestService {
         status: fixture.status as EventStatus,
         homeScore: fixture.homeScore,
         awayScore: fixture.awayScore,
+        htHomeScore: fixture.htHomeScore ?? null,
+        htAwayScore: fixture.htAwayScore ?? null,
+        ftHomeScore: fixture.ftHomeScore ?? null,
+        ftAwayScore: fixture.ftAwayScore ?? null,
         lastDataSync: new Date(),
       },
       update: {
         status: fixture.status as EventStatus,
         homeScore: fixture.homeScore,
         awayScore: fixture.awayScore,
+        // Only set when the payload carries them, so a later partial payload
+        // cannot erase a half-time score that was already recorded.
+        ...(fixture.htHomeScore != null && fixture.htAwayScore != null
+          ? { htHomeScore: fixture.htHomeScore, htAwayScore: fixture.htAwayScore }
+          : {}),
+        ...(fixture.ftHomeScore != null && fixture.ftAwayScore != null
+          ? { ftHomeScore: fixture.ftHomeScore, ftAwayScore: fixture.ftAwayScore }
+          : {}),
         lastDataSync: new Date(),
       },
     });
