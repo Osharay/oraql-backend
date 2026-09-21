@@ -6,6 +6,7 @@ import { SnapshotsService } from './snapshots.service';
 import { PerformanceService } from './performance.service';
 import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
+import { FormService } from './form.service';
 import { StreaksScheduler } from './streaks.scheduler';
 import { StreaksController } from './streaks.controller';
 
@@ -25,6 +26,7 @@ import { StreaksController } from './streaks.controller';
     PerformanceService,
     ClustersService,
     ProfilesService,
+    FormService,
     StreaksScheduler,
   ],
   exports: [

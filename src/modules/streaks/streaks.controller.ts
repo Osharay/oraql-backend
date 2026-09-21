@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, UseGuards, Query } from '@nestjs/common';
+import { Controller, Post, Get, Body, UseGuards, Query, Param } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@/modules/auth/guards/jwt-auth.guard';
 import { AdminGuard } from '@/common/guards/admin.guard';
@@ -9,6 +9,8 @@ import { SnapshotsService } from './snapshots.service';
 import { PerformanceService } from './performance.service';
 import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
+import { FormService, Venue } from './form.service';
+import type { FormSort } from './form-summary';
 
 /**
  * Reads are open to any signed-in user — they are the product. Writes spend
@@ -27,6 +29,7 @@ export class StreaksController {
     private readonly performance: PerformanceService,
     private readonly clusters: ClustersService,
     private readonly profiles: ProfilesService,
+    private readonly form: FormService,
   ) {}
 
 
@@ -64,6 +67,37 @@ export class StreaksController {
   @ApiOperation({ summary: 'Test every slice, correct for multiple comparisons, store candidates' })
   async runEngine() {
     return this.candidates.runEngine();
+  }
+
+  @Get('form/team/:teamId')
+  @ApiOperation({
+    summary:
+      "A team's recent form across every market: the last N results, with the longer record and the market's usual rate beside them",
+  })
+  async teamForm(
+    @Param('teamId') teamId: string,
+    @Query('window') window?: string,
+    @Query('venue') venue?: string,
+    @Query('sort') sort?: string,
+  ) {
+    return this.form.teamForm(teamId, {
+      window: Number(window) || undefined,
+      venue: (['HOME', 'AWAY', 'ALL'].includes(String(venue)) ? venue : 'ALL') as Venue,
+      sort: (['lift', 'rate', 'run'].includes(String(sort)) ? sort : 'lift') as FormSort,
+    });
+  }
+
+  @Get('form/event/:eventId')
+  @ApiOperation({ summary: 'Both sides of a fixture, each at the venue they play it at' })
+  async fixtureForm(
+    @Param('eventId') eventId: string,
+    @Query('window') window?: string,
+    @Query('sort') sort?: string,
+  ) {
+    return this.form.fixtureForm(eventId, {
+      window: Number(window) || undefined,
+      sort: (['lift', 'rate', 'run'].includes(String(sort)) ? sort : 'lift') as FormSort,
+    });
   }
 
   @Get('candidates')
