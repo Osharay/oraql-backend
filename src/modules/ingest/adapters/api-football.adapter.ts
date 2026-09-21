@@ -13,15 +13,47 @@ import {
   TeamRecentMatch,
 } from '../interfaces/data-provider.interface';
 
+/** Out of requests for the day. Retrying cannot help, so callers stop. */
+export class ApiFootballQuotaExhausted extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ApiFootballQuotaExhausted';
+  }
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * API-Football adapter — primary data source.
  * Docs: https://www.api-football.com/documentation-v3
+ *
+ * Every call is paced and 429s are retried. Neither was done before, so a
+ * backfill fired its 24 requests back to back, tripped the per-minute limit
+ * on the first, and then failed every remaining one in the same second —
+ * and the job still logged itself "complete".
  */
 @Injectable()
 export class ApiFootballAdapter implements IDataProvider {
   readonly name = 'api_football';
   private readonly logger = new Logger(ApiFootballAdapter.name);
   private readonly baseUrl: string;
+
+  /**
+   * Minimum gap between requests, process-wide. The adapter is a singleton,
+   * so every ingest job shares one pace rather than each keeping its own.
+   */
+  private readonly minIntervalMs = Math.max(
+    0,
+    Number(process.env.API_FOOTBALL_MIN_INTERVAL_MS ?? 300),
+  );
+  private readonly maxRetries = 4;
+  /** Base for exponential backoff on a 429 with no Retry-After. */
+  private readonly retryBaseMs = Math.max(
+    1,
+    Number(process.env.API_FOOTBALL_RETRY_BASE_MS ?? 8000),
+  );
+  private lastRequestAt = 0;
+  private slot: Promise<void> = Promise.resolve();
   private readonly apiKey: string;
 
   constructor(private readonly config: ConfigService) {
@@ -29,32 +61,90 @@ export class ApiFootballAdapter implements IDataProvider {
     this.apiKey = config.get<string>('dataProviders.apiFootball.key') || '';
   }
 
+  /** Wait for this request's turn. Serialised so concurrent jobs share the pace. */
+  private pace(): Promise<void> {
+    const turn = this.slot.then(async () => {
+      const wait = this.lastRequestAt + this.minIntervalMs - Date.now();
+      if (wait > 0) await sleep(wait);
+      this.lastRequestAt = Date.now();
+    });
+    this.slot = turn.catch(() => undefined);
+    return turn;
+  }
+
+  /**
+   * The provider reports errors in the body, often with HTTP 200 — an empty
+   * `errors` is `[]`, a populated one is an object keyed by kind. Reading only
+   * the status meant a refused request came back as zero results and was
+   * recorded as a successful run with nothing in it.
+   */
+  private bodyErrors(data: unknown): Record<string, string> | null {
+    const errors = (data as { errors?: unknown })?.errors;
+    if (!errors) return null;
+    if (Array.isArray(errors)) return errors.length ? { error: String(errors[0]) } : null;
+    if (typeof errors === 'object' && Object.keys(errors as object).length > 0) {
+      return errors as Record<string, string>;
+    }
+    return null;
+  }
+
   private async request<T>(endpoint: string, params: Record<string, string> = {}): Promise<T> {
     const url = new URL(`${this.baseUrl}/${endpoint}`);
     Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 
-    const response = await fetch(url.toString(), {
-      headers: {
-        'x-apisports-key': this.apiKey,
-        'Content-Type': 'application/json',
-      },
-    });
+    for (let attempt = 0; ; attempt++) {
+      await this.pace();
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      this.logger.error(`API-Football ${endpoint} failed: ${response.status} — ${errorBody}`);
-      throw new Error(`API-Football request failed: ${response.status}`);
+      const response = await fetch(url.toString(), {
+        headers: {
+          'x-apisports-key': this.apiKey,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const text = await response.text();
+      let data: unknown = null;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // non-JSON body; handled by the status checks below
+      }
+      const errors = this.bodyErrors(data);
+
+      // Out for the day. Nothing to wait for — fail at once so the caller
+      // stops instead of spending the rest of its run on refusals.
+      if (errors?.requests) {
+        this.logger.error(`API-Football daily allowance exhausted: ${errors.requests}`);
+        throw new ApiFootballQuotaExhausted(errors.requests);
+      }
+
+      // Per-minute limit: wait and try again.
+      const rateLimited = response.status === 429 || Boolean(errors?.rateLimit);
+      if (rateLimited && attempt < this.maxRetries) {
+        const header = Number(response.headers.get('retry-after'));
+        const waitMs = Number.isFinite(header) && header > 0
+          ? header * 1000
+          : Math.min(60_000, this.retryBaseMs * 2 ** attempt);
+        this.logger.warn(
+          `API-Football rate limited on ${endpoint}; retry ${attempt + 1}/${this.maxRetries} in ${Math.round(waitMs / 1000)}s`,
+        );
+        await sleep(waitMs);
+        continue;
+      }
+
+      if (!response.ok || errors) {
+        const detail = errors ? JSON.stringify(errors) : text.slice(0, 300);
+        this.logger.error(`API-Football ${endpoint} failed: ${response.status} — ${detail}`);
+        throw new Error(`API-Football request failed: ${response.status}`);
+      }
+
+      const remaining = response.headers.get('x-ratelimit-requests-remaining');
+      if (remaining && parseInt(remaining, 10) < 100) {
+        this.logger.warn(`API-Football daily allowance low: ${remaining} requests remaining`);
+      }
+
+      return (data as { response: T }).response;
     }
-
-    const data = await response.json();
-
-    // API-Football rate limit tracking
-    const remaining = response.headers.get('x-ratelimit-requests-remaining');
-    if (remaining && parseInt(remaining, 10) < 100) {
-      this.logger.warn(`API-Football rate limit low: ${remaining} requests remaining`);
-    }
-
-    return data.response as T;
   }
 
   async getFixtures(date: string, leagueId?: string): Promise<FixtureData[]> {

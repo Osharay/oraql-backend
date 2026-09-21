@@ -3,9 +3,9 @@ import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '@/common/prisma/prisma.service';
-import { ApiFootballAdapter } from './adapters/api-football.adapter';
+import { ApiFootballAdapter, ApiFootballQuotaExhausted } from './adapters/api-football.adapter';
 import { OddsApiAdapter } from './adapters/odds-api.adapter';
-import { EventStatus, IngestJobStatus } from '@prisma/client';
+import { EventStatus, IngestJobStatus, Prisma } from '@prisma/client';
 import { FixtureData } from './interfaces/data-provider.interface';
 import { trackedLeagueIds } from '@/config/app.config';
 
@@ -144,8 +144,9 @@ export class IngestService {
       // to our events by team name + kickoff window. Resolving once per odds
       // event rather than per outcome keeps this to a handful of queries.
       const resolved = new Map<string, string | null>();
-      let processed = 0;
+      const byEvent = new Map<string, Prisma.BookmakerOddsCreateManyInput[]>();
       let unmatched = 0;
+      const fetchedAt = new Date();
 
       for (const odd of odds) {
         if (!resolved.has(odd.fixtureExternalId)) {
@@ -158,18 +159,31 @@ export class IngestService {
           continue;
         }
 
-        await this.prisma.bookmakerOdds.create({
-          data: {
-            eventId,
-            bookmaker: odd.bookmaker,
-            marketName: odd.marketName,
-            selection: odd.selection,
-            odds: odd.odds,
-            impliedProb: 1 / odd.odds,
-            fetchedAt: new Date(),
-          },
+        const rows = byEvent.get(eventId) ?? [];
+        rows.push({
+          eventId,
+          bookmaker: odd.bookmaker,
+          marketName: odd.marketName,
+          selection: odd.selection,
+          odds: odd.odds,
+          impliedProb: 1 / odd.odds,
+          fetchedAt,
         });
-        processed++;
+        byEvent.set(eventId, rows);
+      }
+
+      // Replace each event's odds rather than appending. The table was
+      // write-only: every refresh added a full set of rows per bookmaker,
+      // market and selection, and nothing ever read or removed them — so it
+      // grew every half hour for as long as the service ran. Only the latest
+      // price is meaningful.
+      let processed = 0;
+      for (const [eventId, rows] of byEvent) {
+        await this.prisma.$transaction([
+          this.prisma.bookmakerOdds.deleteMany({ where: { eventId } }),
+          this.prisma.bookmakerOdds.createMany({ data: rows }),
+        ]);
+        processed += rows.length;
       }
 
       if (unmatched > 0) {
@@ -515,6 +529,9 @@ export class IngestService {
       this.logger.error(
         `Backfill failed for league ${leagueExternalId} season ${season}: ${message}`,
       );
+      // Out of requests for the day: every remaining league-season would be
+      // refused too, so let the caller stop rather than work through them.
+      if (error instanceof ApiFootballQuotaExhausted) throw error;
       return { leagueExternalId, season, fixtures: 0, finished: 0, requests: 1, error: message };
     }
   }

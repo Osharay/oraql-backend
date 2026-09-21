@@ -3,6 +3,7 @@ import { InjectQueue } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
 import { Job, Queue } from 'bull';
 import { IngestService } from './ingest.service';
+import { ApiFootballQuotaExhausted } from './adapters/api-football.adapter';
 import { ProbabilityService } from '@/modules/probability/probability.service';
 
 /**
@@ -116,24 +117,48 @@ export class IngestProcessor {
   async handleBackfill(job: Job<{ leagues: string[]; seasons: number[] }>) {
     const { leagues = [], seasons = [] } = job.data ?? {};
     const total = leagues.length * seasons.length;
-    const results = [];
+    const results: Array<{ fixtures: number; finished: number; error?: string }> = [];
     let done = 0;
+    let stoppedForQuota = false;
 
-    for (const league of leagues) {
+    outer: for (const league of leagues) {
       for (const season of seasons) {
-        results.push(await this.ingestService.backfillLeagueSeason(league, season));
+        try {
+          results.push(await this.ingestService.backfillLeagueSeason(league, season));
+        } catch (error) {
+          if (error instanceof ApiFootballQuotaExhausted) {
+            stoppedForQuota = true;
+            break outer;
+          }
+          throw error;
+        }
         done++;
         await job.progress(Math.round((done / Math.max(total, 1)) * 100));
       }
     }
 
+    const failed = results.filter((r) => r.error).length;
     const fixtures = results.reduce((n, r) => n + r.fixtures, 0);
     const finished = results.reduce((n, r) => n + r.finished, 0);
-    this.logger.log(
-      `Backfill complete: ${results.length} league-seasons, ${fixtures} fixtures, ${finished} finished`,
-    );
+    const skipped = total - results.length;
 
-    return { requests: results.length, fixtures, finished, results };
+    // Say what actually happened. This used to log "Backfill complete: 24
+    // league-seasons, 0 fixtures" when all 24 had been refused.
+    const summary =
+      `Backfill: ${results.length - failed} of ${total} league-seasons succeeded, ` +
+      `${failed} failed${skipped ? `, ${skipped} not attempted` : ''}` +
+      `${stoppedForQuota ? ' (daily API allowance exhausted)' : ''} — ` +
+      `${fixtures} fixtures, ${finished} finished`;
+
+    if (failed > 0 || stoppedForQuota) this.logger.warn(summary);
+    else this.logger.log(summary);
+
+    // A run where nothing landed is a failure, and Bull should record it as one.
+    if (results.length - failed === 0) {
+      throw new Error(summary);
+    }
+
+    return { requests: results.length, fixtures, finished, failed, skipped, stoppedForQuota };
   }
 
   @Process('compute-probabilities')
