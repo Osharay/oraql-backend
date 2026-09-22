@@ -192,24 +192,7 @@ export class ObservationsService {
     limit = 200,
     options: { refresh?: boolean } = {},
   ): Promise<{ events: number; observations: number; refreshed: number }> {
-    const fresh = await this.prisma.event.findMany({
-      where: {
-        status: EventStatus.FINISHED,
-        observations: { none: {} },
-      },
-      select: { id: true },
-      orderBy: { kickoffAt: 'desc' },
-      take: limit,
-    });
-
-    let ids = fresh.map((e) => e.id);
-    let refreshed = 0;
-
-    if (options.refresh && ids.length < limit) {
-      const stale = await this.findIncompleteEvents(limit - ids.length, ids);
-      refreshed = stale.length;
-      ids = ids.concat(stale);
-    }
+    const { ids, refreshed } = await this.selectBatch(limit, options.refresh ?? false, []);
 
     let observations = 0;
     for (const id of ids) {
@@ -221,6 +204,88 @@ export class ObservationsService {
         (refreshed ? ` (${refreshed} topped up with new or now-settleable markets)` : ''),
     );
     return { events: ids.length, observations, refreshed };
+  }
+
+  /**
+   * Derive every finished event that needs it, batch after batch, until none
+   * is left — so one click after a backfill covers all of it instead of one
+   * batch of 500 per click.
+   *
+   * An event that is still incomplete after deriving (a market that cannot
+   * settle, say) is not picked up again in the same run, so the loop always
+   * ends. `maxEvents` bounds a single run; anything past it waits for the next.
+   */
+  async deriveAll(
+    options: {
+      batch?: number;
+      maxEvents?: number;
+      onProgress?: (p: { events: number; observations: number; refreshed: number; batches: number }) => void;
+    } = {},
+  ): Promise<{ events: number; observations: number; refreshed: number; batches: number; complete: boolean }> {
+    const batch = Math.max(1, Math.min(options.batch ?? 500, 2000));
+    const maxEvents = Math.max(batch, Math.min(options.maxEvents ?? 15000, 15000));
+    const seen: string[] = [];
+    const totals = { events: 0, observations: 0, refreshed: 0, batches: 0 };
+    let complete = false;
+
+    while (totals.events < maxEvents) {
+      const { ids, refreshed } = await this.selectBatch(
+        Math.min(batch, maxEvents - totals.events),
+        true,
+        seen,
+      );
+      if (ids.length === 0) {
+        complete = true;
+        break;
+      }
+
+      for (const id of ids) {
+        totals.observations += await this.deriveForEvent(id);
+      }
+      seen.push(...ids);
+      totals.events += ids.length;
+      totals.refreshed += refreshed;
+      totals.batches += 1;
+      options.onProgress?.({ ...totals });
+      this.logger.log(
+        `Derive batch ${totals.batches}: ${ids.length} events (${totals.events} so far, ${totals.observations} observations)`,
+      );
+    }
+
+    this.logger.log(
+      `Derived ${totals.observations} observations across ${totals.events} finished events in ${totals.batches} batches` +
+        (complete ? '' : ` — stopped at the ${maxEvents}-event cap; run again for the rest`),
+    );
+    return { ...totals, complete };
+  }
+
+  /** Events with no observations first, then (optionally) incomplete ones. */
+  private async selectBatch(
+    limit: number,
+    refresh: boolean,
+    exclude: string[],
+  ): Promise<{ ids: string[]; refreshed: number }> {
+    const fresh = await this.prisma.event.findMany({
+      where: {
+        status: EventStatus.FINISHED,
+        observations: { none: {} },
+        ...(exclude.length ? { id: { notIn: exclude } } : {}),
+      },
+      select: { id: true },
+      orderBy: { kickoffAt: 'desc' },
+      take: limit,
+    });
+
+    let ids = fresh.map((e) => e.id);
+    let refreshed = 0;
+
+    if (refresh && ids.length < limit) {
+      const stale = await this.findIncompleteEvents(limit - ids.length, exclude.concat(ids));
+      refreshed = stale.length;
+      ids = ids.concat(stale);
+    }
+
+    return { ids, refreshed };
   }
 
   /**

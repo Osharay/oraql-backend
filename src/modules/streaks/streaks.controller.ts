@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, UseGuards, Query, Param } from '@nestjs/common';
+import { Controller, Post, Get, Body, UseGuards, Query, Param, HttpCode } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@/modules/auth/guards/jwt-auth.guard';
 import { AdminGuard } from '@/common/guards/admin.guard';
@@ -11,6 +11,15 @@ import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
 import { FormService, Venue } from './form.service';
 import type { FormSort } from './form-summary';
+import { EngineJob, EngineJobsService } from './engine-jobs.service';
+
+/** What a background admin POST answers with; poll GET /streaks/jobs/:id. */
+const accepted = (job: EngineJob) => ({
+  jobId: job.id,
+  kind: job.kind,
+  status: job.status,
+  startedAt: job.startedAt,
+});
 
 /**
  * Reads are open to any signed-in user — they are the product. Writes spend
@@ -30,7 +39,22 @@ export class StreaksController {
     private readonly clusters: ClustersService,
     private readonly profiles: ProfilesService,
     private readonly form: FormService,
+    private readonly jobs: EngineJobsService,
   ) {}
+
+  @Get('jobs')
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: 'Recent background admin jobs, newest first' })
+  listJobs() {
+    return this.jobs.list();
+  }
+
+  @Get('jobs/:id')
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: 'One background job: running, done (with result) or failed (with error)' })
+  getJob(@Param('id') id: string) {
+    return this.jobs.get(id);
+  }
 
 
   @Post('registry/sync')
@@ -45,28 +69,35 @@ export class StreaksController {
   @UseGuards(AdminGuard)
   @ApiOperation({
     summary:
-      'Derive observations for finished events, topping up any missing markets or now-settleable half-time results',
+      'Derive observations for every finished event that needs it (background job; poll /streaks/jobs/:id). ?limit=N does one batch.',
   })
-  async derive(@Query('limit') limit?: string) {
+  @HttpCode(202)
+  derive(@Query('limit') limit?: string) {
+    // With a limit, one batch (the old behaviour). Without, every finished
+    // match that needs it, batch after batch, in the background.
     const parsed = Number(limit);
-    return this.observations.deriveForFinishedEvents(
-      Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 2000) : 500,
-      { refresh: true },
+    const job = this.jobs.start('derive', (report) =>
+      Number.isFinite(parsed) && parsed > 0
+        ? this.observations.deriveForFinishedEvents(Math.min(parsed, 2000), { refresh: true })
+        : this.observations.deriveAll({ onProgress: report }),
     );
+    return accepted(job);
   }
 
   @Post('baselines/compute')
   @UseGuards(AdminGuard)
   @ApiOperation({ summary: 'Recompute market baselines from settled observations' })
-  async computeBaselines() {
-    return this.baselines.computeAll();
+  @HttpCode(202)
+  computeBaselines() {
+    return accepted(this.jobs.start('baselines', () => this.baselines.computeAll()));
   }
 
   @Post('engine/run')
   @UseGuards(AdminGuard)
   @ApiOperation({ summary: 'Test every slice, correct for multiple comparisons, store candidates' })
-  async runEngine() {
-    return this.candidates.runEngine();
+  @HttpCode(202)
+  runEngine() {
+    return accepted(this.jobs.start('engine', () => this.candidates.runEngine()));
   }
 
   @Get('form/team/:teamId')
@@ -116,8 +147,9 @@ export class StreaksController {
   @Post('snapshots/capture')
   @UseGuards(AdminGuard)
   @ApiOperation({ summary: 'Capture pre-kickoff snapshots for upcoming events' })
-  async capture() {
-    return this.snapshots.captureForUpcoming();
+  @HttpCode(202)
+  capture() {
+    return accepted(this.jobs.start('snapshots', () => this.snapshots.captureForUpcoming()));
   }
 
   @Post('snapshots/settle')
@@ -130,8 +162,9 @@ export class StreaksController {
   @Post('clusters/build')
   @UseGuards(AdminGuard)
   @ApiOperation({ summary: "Assemble today's clusters from captured snapshots" })
-  async buildClusters(@Body() body?: { date?: string; size?: number; count?: number }) {
-    return this.clusters.buildForDate(body ?? {});
+  @HttpCode(202)
+  buildClusters(@Body() body?: { date?: string; size?: number; count?: number }) {
+    return accepted(this.jobs.start('clusters', () => this.clusters.buildForDate(body ?? {})));
   }
 
   @Get('clusters')
@@ -149,8 +182,9 @@ export class StreaksController {
   @Post('profiles/compute')
   @UseGuards(AdminGuard)
   @ApiOperation({ summary: 'Derive team-market WATCH / NEUTRAL / CAUTION flags' })
-  async computeProfiles() {
-    return this.profiles.computeAll();
+  @HttpCode(202)
+  computeProfiles() {
+    return accepted(this.jobs.start('profiles', () => this.profiles.computeAll()));
   }
 
   @Get('profiles')
