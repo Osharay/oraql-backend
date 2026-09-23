@@ -8,6 +8,7 @@ import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
 import { FormService } from './form.service';
 import { EngineJobsService } from './engine-jobs.service';
+import { BoardService } from './board.service';
 import { StreaksScheduler } from './streaks.scheduler';
 import { StreaksController } from './streaks.controller';
 
@@ -28,6 +29,7 @@ import { StreaksController } from './streaks.controller';
     ClustersService,
     ProfilesService,
     FormService,
+    BoardService,
     EngineJobsService,
     StreaksScheduler,
   ],

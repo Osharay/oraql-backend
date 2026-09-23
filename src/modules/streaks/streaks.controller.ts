@@ -10,10 +10,16 @@ import { PerformanceService } from './performance.service';
 import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
 import { FormService, Venue } from './form.service';
+import { BoardService } from './board.service';
+import type { BoardSort } from './market-board';
 import type { FormSort } from './form-summary';
 import { EngineJob, EngineJobsService } from './engine-jobs.service';
 
 /** What a background admin POST answers with; poll GET /streaks/jobs/:id. */
+const BOARD_SORTS: BoardSort[] = ['probability', 'edge', 'confidence', 'run'];
+const boardSort = (value?: string): BoardSort =>
+  BOARD_SORTS.includes(value as BoardSort) ? (value as BoardSort) : 'probability';
+
 const accepted = (job: EngineJob) => ({
   jobId: job.id,
   kind: job.kind,
@@ -39,6 +45,7 @@ export class StreaksController {
     private readonly clusters: ClustersService,
     private readonly profiles: ProfilesService,
     private readonly form: FormService,
+    private readonly board: BoardService,
     private readonly jobs: EngineJobsService,
   ) {}
 
@@ -98,6 +105,39 @@ export class StreaksController {
   @HttpCode(202)
   runEngine() {
     return accepted(this.jobs.start('engine', () => this.candidates.runEngine()));
+  }
+
+  @Get('board/event/:eventId')
+  @ApiOperation({
+    summary:
+      'Every market in the registry estimated for one fixture, from both teams\' history at the venue they play it at',
+  })
+  async boardForEvent(
+    @Param('eventId') eventId: string,
+    @Query('sort') sort?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const parsed = Number(limit);
+    return this.board.forEvent(eventId, {
+      sort: boardSort(sort),
+      limit: Number.isFinite(parsed) && parsed > 0 ? parsed : undefined,
+    });
+  }
+
+  @Get('board')
+  @ApiOperation({ summary: "The strongest rows from every fixture in the window" })
+  async boardsForWindow(
+    @Query('hours') hours?: string,
+    @Query('perFixture') perFixture?: string,
+    @Query('sort') sort?: string,
+  ) {
+    const h = Number(hours);
+    const n = Number(perFixture);
+    return this.board.forDate({
+      hours: Number.isFinite(h) && h > 0 ? Math.min(h, 168) : undefined,
+      perFixture: Number.isFinite(n) && n > 0 ? Math.min(n, 20) : undefined,
+      sort: boardSort(sort),
+    });
   }
 
   @Get('form/team/:teamId')
