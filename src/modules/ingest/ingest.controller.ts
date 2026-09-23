@@ -68,6 +68,15 @@ export class IngestController {
     return { queued: 'team-stats-sweep', jobId: job.id };
   }
 
+  @Get('provider/diagnose')
+  @ApiOperation({
+    summary:
+      'Ask API-Football about this account, and whether statistics come back for a fixture we hold',
+  })
+  async diagnoseProvider() {
+    return this.ingestService.diagnoseProvider();
+  }
+
   @Get('odds/diagnose')
   @ApiOperation({
     summary:

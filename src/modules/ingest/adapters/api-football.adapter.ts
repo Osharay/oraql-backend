@@ -304,6 +304,71 @@ export class ApiFootballAdapter implements IDataProvider {
     };
   }
 
+  /**
+   * What the provider says about this account, and whether statistics come
+   * back for a fixture we already hold.
+   *
+   * "Ingested 0 match stats" for every team says the statistics endpoint is
+   * answering with nothing, but not why: the wrong plan, a league the
+   * provider does not cover to that depth, a season outside the plan's
+   * history, or the day's allowance already spent. /status is the account's
+   * own answer, and one statistics call against a known finished fixture
+   * settles the rest.
+   */
+  async diagnose(fixtureExternalId?: string): Promise<{
+    account: unknown;
+    statistics: {
+      asked: boolean;
+      fixtureExternalId: string | null;
+      rows: number | null;
+      sampleTypes: string[];
+      error: string | null;
+    };
+    givenUp: boolean;
+  }> {
+    let account: unknown = null;
+    try {
+      const raw = await this.request<unknown>('status', {});
+      account = raw;
+    } catch (error) {
+      account = { error: error instanceof Error ? error.message : 'unknown error' };
+    }
+
+    const statistics: {
+      asked: boolean;
+      fixtureExternalId: string | null;
+      rows: number | null;
+      sampleTypes: string[];
+      error: string | null;
+    } = {
+      asked: Boolean(fixtureExternalId),
+      fixtureExternalId: fixtureExternalId ?? null,
+      rows: null,
+      sampleTypes: [],
+      error: null,
+    };
+
+    if (fixtureExternalId) {
+      try {
+        const raw = await this.request<any[]>('fixtures/statistics', {
+          fixture: String(fixtureExternalId),
+        });
+        statistics.rows = raw.length;
+        statistics.sampleTypes = (raw[0]?.statistics ?? [])
+          .slice(0, 8)
+          .map((st: any) => String(st.type));
+      } catch (error) {
+        statistics.error = error instanceof Error ? error.message : 'unknown error';
+      }
+    }
+
+    return {
+      account,
+      statistics,
+      givenUp: ApiFootballAdapter.statisticsUnavailable,
+    };
+  }
+
   async getMatchStats(teamExternalId: string, last = 10): Promise<MatchStatsData[]> {
     const matches = await this.getTeamRecentMatches(teamExternalId, last);
     return matches.map((m) => m.stats);

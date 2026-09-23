@@ -133,6 +133,16 @@ export class ObservationsService {
       const definitionId = defIdByMarketId.get(def.marketId);
       if (!definitionId) continue;
 
+      // Corner and card markets need per-match statistics. When the provider
+      // sends none — and on this account it sends none at all — writing an
+      // UNKNOWN per market and side records a gap that can never fill: about
+      // one row in ten, on every match, for good. Skip them instead, and let
+      // the completeness check below expect fewer rows for such an event, so
+      // it still counts as done. If statistics arrive later, the expectation
+      // rises again and the event is picked back up, exactly as half-time
+      // markets were once half-time scores started coming in.
+      if (!hasStats && needsStats(def.requires)) continue;
+
       for (const side of def.selections) {
         const result = def.evaluate(outcome, side as Selection);
 
@@ -141,12 +151,7 @@ export class ObservationsService {
 
         // UNKNOWN means the inputs were not there. Recording it keeps the gap
         // visible instead of silently shrinking the sample.
-        const quality =
-          result === 'UNKNOWN'
-            ? DataQuality.SUSPECT
-            : !hasStats && needsStats(def.requires)
-              ? DataQuality.PARTIAL
-              : DataQuality.OK;
+        const quality = result === 'UNKNOWN' ? DataQuality.SUSPECT : DataQuality.OK;
 
         rows.push({
           eventId: event.id,
@@ -304,10 +309,16 @@ export class ObservationsService {
       select: { marketId: true },
     });
     const active = new Set(definitions.map((d) => d.marketId));
-    const expected = MARKET_DEFINITIONS.filter((d) => active.has(d.marketId)).reduce(
-      (n, d) => n + d.selections.length,
-      0,
-    );
+    const live = MARKET_DEFINITIONS.filter((d) => active.has(d.marketId));
+
+    const expected = live.reduce((n, d) => n + d.selections.length, 0);
+    // What a match with no per-match statistics can produce: corner and card
+    // markets are not written for it, so expecting them would make every such
+    // match look incomplete for ever and drag it through every refresh pass.
+    const expectedWithoutStats = live
+      .filter((d) => !d.requires.some((r) => r === 'corners' || r === 'cards'))
+      .reduce((n, d) => n + d.selections.length, 0);
+
     if (expected === 0) return [];
 
     const rows = await this.prisma.$queryRaw<Array<{ id: string }>>`
@@ -319,7 +330,13 @@ export class ObservationsService {
              SELECT DISTINCT o."marketDefinitionId", o.selection
              FROM market_observations o
              WHERE o."eventId" = e.id
-           ) pairs) < ${expected}
+           ) pairs) < (
+             CASE
+               WHEN EXISTS (SELECT 1 FROM match_stats ms WHERE ms."eventId" = e.id)
+               THEN ${expected}
+               ELSE ${expectedWithoutStats}
+             END
+           )
           OR (
             e."htHomeScore" IS NOT NULL
             AND EXISTS (

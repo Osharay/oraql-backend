@@ -315,6 +315,52 @@ export class IngestService {
   }
 
   /**
+   * Why is the provider sending no match statistics?
+   *
+   * Asks the provider about the account (plan, allowance, what is left) and
+   * then requests statistics for a real finished fixture we already hold, so
+   * the answer is about this account and this data rather than a guess.
+   */
+  async diagnoseProvider() {
+    // A recent finished fixture from the deepest-covered leagues: if
+    // statistics exist anywhere on this plan, they exist here.
+    const event = await this.prisma.event.findFirst({
+      where: { status: EventStatus.FINISHED, externalId: { not: '' } },
+      orderBy: { kickoffAt: 'desc' },
+      select: {
+        externalId: true,
+        kickoffAt: true,
+        league: { select: { name: true, season: true } },
+        matchStats: { select: { id: true }, take: 1 },
+      },
+    });
+
+    const result = await this.apiFootball.diagnose(event?.externalId);
+
+    const storedWithStats = await this.prisma.matchStats.count();
+
+    return {
+      testedFixture: event
+        ? {
+            externalId: event.externalId,
+            kickoffAt: event.kickoffAt,
+            league: event.league.name,
+            season: event.league.season,
+            alreadyStored: event.matchStats.length > 0,
+          }
+        : null,
+      storedMatchStatsRows: storedWithStats,
+      ...result,
+      reading:
+        result.statistics.rows && result.statistics.rows > 0
+          ? 'Statistics came back for this fixture, so the endpoint works on this plan. The sweep failing means the fixtures it asked about are ones the provider does not cover to that depth — usually older seasons or smaller leagues.'
+          : result.statistics.error
+            ? 'The statistics request itself failed. The message above is the provider\'s own.'
+            : 'The provider returned an empty statistics list for a fixture we hold. Check the account block above: the plan decides how far back coverage goes, and smaller competitions carry no statistics at any tier.',
+    };
+  }
+
+  /**
    * Is the Odds API key working? Free to ask, so it can be checked from the
    * admin page as often as needed.
    */
