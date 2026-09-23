@@ -157,15 +157,6 @@ export class IngestProcessor {
   async handleTeamStatsSweep(job: Job<{ maxTeams?: number }>) {
     const maxTeams = job.data?.maxTeams ?? 40;
 
-    // One fixtures request per team buys nothing when the provider will not
-    // return the statistics those fixtures are fetched for.
-    if (ApiFootballAdapter.statisticsState().unavailable) {
-      this.logger.warn(
-        'Team stats sweep skipped: the provider is returning no per-fixture statistics on this plan.',
-      );
-      return { synced: 0, skipped: 0, note: 'provider statistics unavailable' };
-    }
-
     const teams = await this.ingestService.getTeamsNeedingStats(72);
 
     let synced = 0;
@@ -189,11 +180,11 @@ export class IngestProcessor {
       await job.progress(Math.round((synced / Math.min(teams.length, maxTeams)) * 100));
     }
 
+    const stats = ApiFootballAdapter.statisticsState();
     this.logger.log(
-      `Team stats sweep: ${synced} synced, ${skipped} still fresh` +
-        (ApiFootballAdapter.statisticsState().unavailable
-          ? ' — stopped early: no per-fixture statistics on this plan'
-          : ''),
+      `Team stats sweep: ${synced} synced, ${skipped} still fresh — statistics from ` +
+        `${stats.leaguesWithStatistics} of ${stats.leaguesTried} leagues tried, ` +
+        `${stats.leaguesGivenUp} with none`,
     );
 
     // Now that history exists, compute probabilities — but only for events

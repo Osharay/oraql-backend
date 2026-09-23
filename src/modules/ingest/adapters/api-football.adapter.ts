@@ -35,25 +35,47 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 @Injectable()
 export class ApiFootballAdapter implements IDataProvider {
   /**
-   * Whether this process has given up on per-fixture statistics, and how many
-   * empty answers led there. Static: the provider's plan is a property of the
-   * account, not of one adapter instance.
+   * Whether per-fixture statistics are worth asking for, league by league.
+   *
+   * The provider carries statistics for the competitions it covers deeply -
+   * a Champions League tie returns shots, fouls and corners - and nothing at
+   * all for the rest, on the same account and plan. A single process-wide
+   * switch was wrong twice over: one sweep through small leagues would turn
+   * statistics off for the majors too, and nothing would turn them back on.
+   *
+   * So the giving up is per competition: after EMPTY_STATS_LIMIT empty
+   * answers in a row from one league, and none that ever carried data, stop
+   * asking for that league. Any answer with data clears the count.
    */
-  private static statisticsUnavailable = false;
-  private static emptyStatsRun = 0;
-  private static readonly EMPTY_STATS_LIMIT = 15;
+  private static readonly statsByLeague = new Map<string, { empty: number; ok: number }>();
+  private static readonly EMPTY_STATS_LIMIT = 5;
 
-  /** For tests and for the admin log line. */
+  private static statsLeague(leagueId: string) {
+    const seen = ApiFootballAdapter.statsByLeague.get(leagueId) ?? { empty: 0, ok: 0 };
+    ApiFootballAdapter.statsByLeague.set(leagueId, seen);
+    return seen;
+  }
+
+  /** Has this league answered with nothing often enough to stop asking? */
+  static statisticsGivenUpFor(leagueId: string): boolean {
+    const seen = ApiFootballAdapter.statsByLeague.get(leagueId);
+    return Boolean(seen && seen.ok === 0 && seen.empty >= ApiFootballAdapter.EMPTY_STATS_LIMIT);
+  }
+
+  /** For the admin check and the sweep's log line. */
   static statisticsState() {
+    const leagues = [...ApiFootballAdapter.statsByLeague.entries()];
     return {
-      unavailable: ApiFootballAdapter.statisticsUnavailable,
-      emptyRun: ApiFootballAdapter.emptyStatsRun,
+      leaguesTried: leagues.length,
+      leaguesWithStatistics: leagues.filter(([, v]) => v.ok > 0).length,
+      leaguesGivenUp: leagues.filter(
+        ([, v]) => v.ok === 0 && v.empty >= ApiFootballAdapter.EMPTY_STATS_LIMIT,
+      ).length,
     };
   }
 
   static resetStatisticsState() {
-    ApiFootballAdapter.statisticsUnavailable = false;
-    ApiFootballAdapter.emptyStatsRun = 0;
+    ApiFootballAdapter.statsByLeague.clear();
   }
 
   readonly name = 'api_football';
@@ -324,7 +346,7 @@ export class ApiFootballAdapter implements IDataProvider {
       sampleTypes: string[];
       error: string | null;
     };
-    givenUp: boolean;
+    statisticsState: ReturnType<typeof ApiFootballAdapter.statisticsState>;
   }> {
     let account: unknown = null;
     try {
@@ -365,7 +387,7 @@ export class ApiFootballAdapter implements IDataProvider {
     return {
       account,
       statistics,
-      givenUp: ApiFootballAdapter.statisticsUnavailable,
+      statisticsState: ApiFootballAdapter.statisticsState(),
     };
   }
 
@@ -394,26 +416,27 @@ export class ApiFootballAdapter implements IDataProvider {
       // requests to learn nothing. After EMPTY_STATS_LIMIT empty answers in a
       // row this stops asking for the rest of the process's life, so the
       // quota goes to fixtures and scores instead.
-      if (ApiFootballAdapter.statisticsUnavailable) break;
+      const leagueId = String(fixture.league?.id ?? 'unknown');
+      if (ApiFootballAdapter.statisticsGivenUpFor(leagueId)) continue;
 
       const fixtureStats = await this.request<any[]>('fixtures/statistics', {
         fixture: String(fixture.fixture.id),
         team: teamExternalId,
       });
 
+      const seen = ApiFootballAdapter.statsLeague(leagueId);
       if (fixtureStats.length === 0) {
-        ApiFootballAdapter.emptyStatsRun++;
-        if (ApiFootballAdapter.emptyStatsRun >= ApiFootballAdapter.EMPTY_STATS_LIMIT) {
-          ApiFootballAdapter.statisticsUnavailable = true;
+        seen.empty++;
+        if (seen.ok === 0 && seen.empty === ApiFootballAdapter.EMPTY_STATS_LIMIT) {
           this.logger.warn(
-            `No per-fixture statistics returned ${ApiFootballAdapter.emptyStatsRun} times in a row — ` +
-              'the plan probably does not include /fixtures/statistics. Corner and card markets ' +
-              'will stay unsettled; goals, results and half-time markets are unaffected. ' +
-              'Not asking again until the service restarts.',
+            `No per-fixture statistics from league ${leagueId} after ${seen.empty} tries — ` +
+              'the provider carries none for this competition. Corner and card markets will ' +
+              'stay unsettled there; every other market, and every other league, is unaffected.',
           );
         }
       } else {
-        ApiFootballAdapter.emptyStatsRun = 0;
+        seen.ok++;
+        seen.empty = 0;
       }
 
       if (fixtureStats.length > 0) {
