@@ -7,6 +7,7 @@ import { ApiFootballAdapter, ApiFootballQuotaExhausted } from './adapters/api-fo
 import { OddsApiAdapter } from './adapters/odds-api.adapter';
 import { EventStatus, IngestJobStatus, Prisma } from '@prisma/client';
 import { FixtureData } from './interfaces/data-provider.interface';
+import { compareCoverage, isWantedCompetition } from './league-quality';
 import {
   trackedLeagueIds,
   oddsPollingEnabled,
@@ -150,9 +151,15 @@ export class IngestService {
       // rate-limited per team, so a worldwide fixture list does not mean more
       // coverage — it means none of it is deep enough to use.
       const tracked = trackedLeagueIds();
-      const fixtures = tracked.length
+      const inScope = tracked.length
         ? all.filter((f) => tracked.includes(String(f.leagueExternalId)))
         : all;
+
+      // Age-group, youth and exhibition football: almost no history to
+      // measure, barely priced anywhere, and every one that reaches the
+      // engine adds a test every real finding then has to beat.
+      const fixtures = inScope.filter((f) => isWantedCompetition(f.league?.name ?? ''));
+      const dropped = inScope.length - fixtures.length;
 
       let processed = 0;
 
@@ -164,7 +171,8 @@ export class IngestService {
       await this.updateJobRecord(job.id, IngestJobStatus.COMPLETED, processed);
       this.logger.log(
         `Ingested ${processed} fixtures for ${date}` +
-          (tracked.length ? ` (${all.length - fixtures.length} outside tracked leagues)` : ''),
+          (tracked.length ? ` (${all.length - inScope.length} outside tracked leagues)` : '') +
+          (dropped ? ` (${dropped} youth or friendly fixtures skipped)` : ''),
       );
       return processed;
     } catch (error) {
@@ -232,20 +240,42 @@ export class IngestService {
       finished.map((f) => [f.leagueId, f._count._all]),
     );
 
-    const leagues = new Map<string, { externalId: string; name: string; season: number }>();
+    const leagues = new Map<
+      string,
+      { externalId: string; name: string; season: number; upcoming: number }
+    >();
     for (const e of upcoming) {
       if ((finishedByLeague.get(e.leagueId) ?? 0) >= minFinished) continue;
+      // Nothing we would not hold a fixture for is worth a backfill request.
+      if (!isWantedCompetition(e.league.name)) continue;
+
+      const seen = leagues.get(e.league.externalId);
+      if (seen) {
+        seen.upcoming++;
+        continue;
+      }
       leagues.set(e.league.externalId, {
         externalId: e.league.externalId,
         name: e.league.name,
         season: e.league.season,
+        upcoming: 1,
       });
     }
+
+    // Busiest serious competitions first: a budget of 100 requests should
+    // reach the leagues with twenty fixtures this week before a cup tie in a
+    // third division.
+    const ordered = [...leagues.values()].sort((a, b) =>
+      compareCoverage(
+        { leagueExternalId: a.externalId, name: a.name, upcoming: a.upcoming },
+        { leagueExternalId: b.externalId, name: b.name, upcoming: b.upcoming },
+      ),
+    );
 
     const wanted: Array<{ leagueExternalId: string; season: number; name: string }> = [];
     const client = options.ignoreCooldown ? null : await this.coverageRedis();
 
-    for (const league of leagues.values()) {
+    for (const league of ordered) {
       for (let i = 0; i < seasonDepth; i++) {
         if (wanted.length >= budget) return wanted;
         const season = league.season - i;
