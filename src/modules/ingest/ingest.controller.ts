@@ -68,6 +68,15 @@ export class IngestController {
     return { queued: 'team-stats-sweep', jobId: job.id };
   }
 
+  @Get('odds/diagnose')
+  @ApiOperation({
+    summary:
+      'Check the Odds API key without spending a credit — says whether it is rejected, out of credits, or fine',
+  })
+  async diagnoseOdds() {
+    return this.ingestService.diagnoseOdds();
+  }
+
   @Post('coverage')
   @ApiOperation({
     summary:

@@ -285,6 +285,25 @@ export class IngestService {
   }
 
   /**
+   * Is the Odds API key working? Free to ask, so it can be checked from the
+   * admin page as often as needed.
+   */
+  async diagnoseOdds() {
+    const [switchState, key] = await Promise.all([this.getOddsPolling(), this.oddsApi.diagnose()]);
+    return {
+      polling: switchState,
+      key,
+      nextStep: key.ok
+        ? switchState.enabled
+          ? 'Key works and polling is on. If odds still do not appear, the failure is event matching, not authentication.'
+          : 'Key works. Turn odds polling on to start storing prices.'
+        : key.keyPresent
+          ? 'Replace ODDS_API_KEY on Railway with a current key from the-odds-api.com, then run this check again.'
+          : 'Set ODDS_API_KEY on Railway, then run this check again.',
+    };
+  }
+
+  /**
    * Ingest odds data from The Odds API and update implied probabilities.
    */
   async ingestOdds(sportKey = 'soccer_epl') {
