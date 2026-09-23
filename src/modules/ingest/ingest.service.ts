@@ -322,41 +322,94 @@ export class IngestService {
    * the answer is about this account and this data rather than a guess.
    */
   async diagnoseProvider() {
-    // A recent finished fixture from the deepest-covered leagues: if
-    // statistics exist anywhere on this plan, they exist here.
-    const event = await this.prisma.event.findFirst({
-      where: { status: EventStatus.FINISHED, externalId: { not: '' } },
-      orderBy: { kickoffAt: 'desc' },
-      select: {
-        externalId: true,
-        kickoffAt: true,
-        league: { select: { name: true, season: true } },
-        matchStats: { select: { id: true }, take: 1 },
-      },
-    });
+    const now = new Date();
 
-    const result = await this.apiFootball.diagnose(event?.externalId);
+    // Test matches that have actually been played: the first attempt picked a
+    // fixture kicking off later the same day, which of course had no
+    // statistics. Prefer the big five plus the Champions League, where the
+    // provider's coverage is deepest — if statistics exist on this plan at
+    // all, they exist there — and fall back to any played match.
+    const played = {
+      status: EventStatus.FINISHED,
+      kickoffAt: { lt: new Date(now.getTime() - 3 * 3600_000) },
+      ftHomeScore: { not: null },
+    };
 
-    const storedWithStats = await this.prisma.matchStats.count();
+    const [major, any] = await Promise.all([
+      this.prisma.event.findMany({
+        where: { ...played, league: { externalId: { in: ['39', '140', '78', '135', '61', '2'] } } },
+        orderBy: { kickoffAt: 'desc' },
+        take: 2,
+        select: {
+          externalId: true,
+          kickoffAt: true,
+          league: { select: { name: true, season: true } },
+          matchStats: { select: { id: true }, take: 1 },
+        },
+      }),
+      this.prisma.event.findMany({
+        where: played,
+        orderBy: { kickoffAt: 'desc' },
+        take: 1,
+        select: {
+          externalId: true,
+          kickoffAt: true,
+          league: { select: { name: true, season: true } },
+          matchStats: { select: { id: true }, take: 1 },
+        },
+      }),
+    ]);
+
+    const sample = [...major, ...any];
+
+    const tests = [];
+    let account: unknown = null;
+
+    for (const [i, event] of sample.entries()) {
+      const result = await this.apiFootball.diagnose(event.externalId);
+      if (i === 0) account = result.account;
+      tests.push({
+        league: event.league.name,
+        season: event.league.season,
+        kickoffAt: event.kickoffAt,
+        externalId: event.externalId,
+        alreadyStored: event.matchStats.length > 0,
+        statisticRows: result.statistics.rows,
+        sampleTypes: result.statistics.sampleTypes,
+        error: result.statistics.error,
+      });
+    }
+
+    if (account === null) account = (await this.apiFootball.diagnose()).account;
+
+    const [storedMatchStatsRows, futureFinished, finishedWithoutScore] = await Promise.all([
+      this.prisma.matchStats.count(),
+      // A match marked finished whose kickoff has not arrived is a data bug,
+      // and it poisons everything downstream: it is derived as if settled and
+      // counts towards a league's history.
+      this.prisma.event.count({
+        where: { status: EventStatus.FINISHED, kickoffAt: { gt: now } },
+      }),
+      this.prisma.event.count({
+        where: { status: EventStatus.FINISHED, ftHomeScore: null, homeScore: null },
+      }),
+    ]);
+
+    const anyStats = tests.some((t) => (t.statisticRows ?? 0) > 0);
 
     return {
-      testedFixture: event
-        ? {
-            externalId: event.externalId,
-            kickoffAt: event.kickoffAt,
-            league: event.league.name,
-            season: event.league.season,
-            alreadyStored: event.matchStats.length > 0,
-          }
-        : null,
-      storedMatchStatsRows: storedWithStats,
-      ...result,
-      reading:
-        result.statistics.rows && result.statistics.rows > 0
-          ? 'Statistics came back for this fixture, so the endpoint works on this plan. The sweep failing means the fixtures it asked about are ones the provider does not cover to that depth — usually older seasons or smaller leagues.'
-          : result.statistics.error
-            ? 'The statistics request itself failed. The message above is the provider\'s own.'
-            : 'The provider returned an empty statistics list for a fixture we hold. Check the account block above: the plan decides how far back coverage goes, and smaller competitions carry no statistics at any tier.',
+      account,
+      storedMatchStatsRows,
+      dataIntegrity: {
+        finishedButNotYetKickedOff: futureFinished,
+        finishedWithoutAnyScore: finishedWithoutScore,
+      },
+      tests,
+      reading: anyStats
+        ? 'Statistics do come back on this plan. Where they are missing it is the competition, not the account: the provider carries no per-match statistics for smaller leagues. Corner and card markets will settle for the majors and stay unsettled elsewhere.'
+        : tests.length === 0
+          ? 'No played match with a final score was found to test against.'
+          : 'No statistics for any played match tested, including major leagues — so this is the account or the endpoint, not league coverage. The account block above is the provider’s own answer.',
     };
   }
 
