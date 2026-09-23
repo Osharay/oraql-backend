@@ -7,7 +7,12 @@ import { ApiFootballAdapter, ApiFootballQuotaExhausted } from './adapters/api-fo
 import { OddsApiAdapter } from './adapters/odds-api.adapter';
 import { EventStatus, IngestJobStatus, Prisma } from '@prisma/client';
 import { FixtureData } from './interfaces/data-provider.interface';
-import { trackedLeagueIds, oddsPollingEnabled } from '@/config/app.config';
+import {
+  trackedLeagueIds,
+  oddsPollingEnabled,
+  coverageBudget,
+  coverageSeasons,
+} from '@/config/app.config';
 
 @Injectable()
 export class IngestService {
@@ -167,6 +172,115 @@ export class IngestService {
       await this.updateJobRecord(job.id, IngestJobStatus.FAILED, 0, message);
       this.logger.error(`Fixture ingest failed for ${date}: ${message}`);
       throw error;
+    }
+  }
+
+  /** Redis key marking a league-season as recently attempted. */
+  private static coverageKey(league: string, season: number) {
+    return `oraql:coverage:${league}:${season}`;
+  }
+
+  /**
+   * League-seasons worth backfilling, judged from the fixtures actually
+   * coming up.
+   *
+   * The engine can only measure a team it has history for, and history only
+   * existed for six hand-listed competitions — so a fixture from anywhere else
+   * was in the database with nothing behind it and could never produce a
+   * streak. Rather than maintain that list by hand, this reads the leagues of
+   * the upcoming fixtures and returns the ones whose stored history is thin.
+   *
+   * One provider request per league-season, so breadth here is cheap; the
+   * budget is what keeps a first run from spending the day's quota at once.
+   * A league-season that was attempted recently is left alone for a week,
+   * which stops a competition the provider has no history for from being
+   * requested again every single day.
+   */
+  async leagueSeasonsNeedingHistory(options: {
+    days?: number;
+    minFinished?: number;
+    budget?: number;
+    seasons?: number;
+    ignoreCooldown?: boolean;
+  } = {}): Promise<Array<{ leagueExternalId: string; season: number; name: string }>> {
+    const days = options.days ?? 7;
+    const minFinished = options.minFinished ?? 50;
+    const budget = options.budget ?? coverageBudget();
+    const seasonDepth = options.seasons ?? coverageSeasons();
+
+    const now = new Date();
+    const upcoming = await this.prisma.event.findMany({
+      where: {
+        kickoffAt: { gte: now, lte: new Date(now.getTime() + days * 86_400_000) },
+        status: { in: [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED] },
+      },
+      select: { leagueId: true, league: { select: { externalId: true, name: true, season: true } } },
+    });
+
+    if (upcoming.length === 0) return [];
+
+    // How much settled history each of those leagues already has.
+    const finished = await this.prisma.event.groupBy({
+      by: ['leagueId'],
+      where: {
+        status: EventStatus.FINISHED,
+        leagueId: { in: [...new Set(upcoming.map((e) => e.leagueId))] },
+      },
+      _count: { _all: true },
+    });
+    const finishedByLeague = new Map<string, number>(
+      finished.map((f) => [f.leagueId, f._count._all]),
+    );
+
+    const leagues = new Map<string, { externalId: string; name: string; season: number }>();
+    for (const e of upcoming) {
+      if ((finishedByLeague.get(e.leagueId) ?? 0) >= minFinished) continue;
+      leagues.set(e.league.externalId, {
+        externalId: e.league.externalId,
+        name: e.league.name,
+        season: e.league.season,
+      });
+    }
+
+    const wanted: Array<{ leagueExternalId: string; season: number; name: string }> = [];
+    const client = options.ignoreCooldown ? null : await this.coverageRedis();
+
+    for (const league of leagues.values()) {
+      for (let i = 0; i < seasonDepth; i++) {
+        if (wanted.length >= budget) return wanted;
+        const season = league.season - i;
+        if (client) {
+          const seen = await client.get(IngestService.coverageKey(league.externalId, season));
+          if (seen) continue;
+        }
+        wanted.push({ leagueExternalId: league.externalId, season, name: league.name });
+      }
+    }
+
+    return wanted;
+  }
+
+  /** Remember that a league-season was attempted, so it is not retried daily. */
+  async markCoverageAttempted(leagueExternalId: string, season: number, days = 7) {
+    const client = await this.coverageRedis();
+    if (!client) return;
+    try {
+      await client.set(
+        IngestService.coverageKey(leagueExternalId, season),
+        new Date().toISOString(),
+        'EX',
+        days * 86_400,
+      );
+    } catch {
+      // A missing cooldown only means the league-season is tried again sooner.
+    }
+  }
+
+  private async coverageRedis() {
+    try {
+      return await this.ingestQueue.client;
+    } catch {
+      return null;
     }
   }
 

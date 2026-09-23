@@ -37,18 +37,39 @@ export const frontendUrl = (): string => {
  * work far too thin: the team-history sweep is capped at 40 teams a run, so
  * with thousands of clubs in the window almost none ever got history, and the
  * probability engine skipped nearly every event for want of it. Set
- * TRACKED_LEAGUE_IDS to widen or narrow the list; empty means no filter.
+ * TRACKED_LEAGUE_IDS narrows the fixture ingest to a list of API-Football
+ * league ids. Empty — the default — means every competition the provider
+ * returns for a date.
  *
- * Defaults to the same six competitions the odds refresh already polls:
- * Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Champions League.
+ * It was six competitions while the team-stats sweep was the bottleneck: a
+ * worldwide fixture list meant thousands of clubs and ~11 provider requests
+ * each, so nothing ever got deep enough to measure. History now comes from
+ * the league-season backfill instead, at one request per league-season, so
+ * breadth is cheap and the filter is only there for when a deployment wants
+ * to be deliberately narrow.
  */
-export const trackedLeagueIds = (): string[] => {
-  const raw = process.env.TRACKED_LEAGUE_IDS;
-  if (raw === '') return [];
-  return (raw ?? '39,140,78,135,61,2')
+export const trackedLeagueIds = (): string[] =>
+  (process.env.TRACKED_LEAGUE_IDS ?? '')
     .split(',')
     .map((id) => id.trim())
     .filter(Boolean);
+
+/**
+ * How many league-seasons one automatic coverage run may backfill.
+ *
+ * One provider request each, so this is the per-run share of the daily quota
+ * that goes to widening coverage. Anything not reached this run is picked up
+ * by the next.
+ */
+export const coverageBudget = (): number => {
+  const parsed = Number(process.env.COVERAGE_MAX_REQUESTS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 1000) : 100;
+};
+
+/** Seasons of history to fetch for a league that has none. */
+export const coverageSeasons = (): number => {
+  const parsed = Number(process.env.COVERAGE_SEASONS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 6) : 3;
 };
 
 /**

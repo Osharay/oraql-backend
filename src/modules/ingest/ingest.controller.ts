@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Req, UseGuards, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Body, Query, Req, UseGuards, BadRequestException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
@@ -66,6 +66,43 @@ export class IngestController {
       },
     );
     return { queued: 'team-stats-sweep', jobId: job.id };
+  }
+
+  @Post('coverage')
+  @ApiOperation({
+    summary:
+      'Backfill history for every league with fixtures coming up that has none — one request per league-season',
+  })
+  async coverage(@Body() body: { budget?: number; days?: number; minFinished?: number }) {
+    const job = await this.ingestQueue.add(
+      'coverage-backfill',
+      {
+        budget: body?.budget,
+        days: body?.days,
+        minFinished: body?.minFinished,
+      },
+      {
+        attempts: 1,
+        jobId: `coverage-backfill:${new Date().toISOString().slice(0, 10)}:manual`,
+        removeOnComplete: true,
+      },
+    );
+    return { queued: 'coverage-backfill', jobId: job.id };
+  }
+
+  @Get('coverage')
+  @ApiOperation({ summary: 'League-seasons that would be backfilled next' })
+  async coveragePreview(@Query('days') days?: string, @Query('budget') budget?: string) {
+    const targets = await this.ingestService.leagueSeasonsNeedingHistory({
+      days: days ? Number(days) : undefined,
+      budget: budget ? Number(budget) : undefined,
+      ignoreCooldown: true,
+    });
+    return {
+      leagueSeasons: targets.length,
+      competitions: new Set(targets.map((t) => t.leagueExternalId)).size,
+      targets: targets.slice(0, 50),
+    };
   }
 
   @Post('backfill')

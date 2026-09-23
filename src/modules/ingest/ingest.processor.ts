@@ -61,7 +61,89 @@ export class IngestProcessor {
       { attempts: 2, jobId: sweepJobId(), removeOnComplete: true },
     );
 
+    // Fixtures arrive from every competition the provider covers, and a
+    // fixture whose league has no history behind it can never produce a
+    // streak. Widen the history to match what is actually being played.
+    await this.ingestQueue.add(
+      'coverage-backfill',
+      {},
+      {
+        attempts: 1,
+        jobId: `coverage-backfill:${new Date().toISOString().slice(0, 10)}`,
+        removeOnComplete: true,
+      },
+    );
+
     return { totalProcessed };
+  }
+
+  /**
+   * Widen history to cover the leagues actually being played.
+   *
+   * One provider request per league-season, so this is the cheapest coverage
+   * there is: the six-league backfill cost 24 requests and produced 8,085
+   * matches. Bounded by COVERAGE_MAX_REQUESTS a run and resumed on the next,
+   * and it stops the moment the provider says the quota is gone.
+   */
+  @Process('coverage-backfill')
+  async handleCoverageBackfill(job: Job<{ budget?: number; days?: number; minFinished?: number }>) {
+    const wanted = await this.ingestService.leagueSeasonsNeedingHistory({
+      budget: job.data?.budget,
+      days: job.data?.days,
+      minFinished: job.data?.minFinished,
+    });
+
+    if (wanted.length === 0) {
+      this.logger.log('Coverage: every league with fixtures coming up already has history');
+      return { covered: 0, fixtures: 0 };
+    }
+
+    this.logger.log(
+      `Coverage: ${wanted.length} league-seasons to backfill (${
+        new Set(wanted.map((w) => w.leagueExternalId)).size
+      } competitions)`,
+    );
+
+    let covered = 0;
+    let fixtures = 0;
+    let finished = 0;
+    let quotaStopped = false;
+
+    for (const [i, target] of wanted.entries()) {
+      try {
+        const result = await this.ingestService.backfillLeagueSeason(
+          target.leagueExternalId,
+          target.season,
+        );
+        fixtures += result.fixtures;
+        finished += result.finished;
+        covered++;
+      } catch (error) {
+        if (error instanceof ApiFootballQuotaExhausted) {
+          quotaStopped = true;
+          break;
+        }
+        // One dead league-season must not stop the rest; it is marked below
+        // either way, so it will not be retried tomorrow.
+        this.logger.warn(
+          `Coverage: league ${target.leagueExternalId} season ${target.season} failed — ` +
+            (error instanceof Error ? error.message : 'unknown error'),
+        );
+      }
+
+      // Attempted, whatever the outcome: a competition the provider has no
+      // history for should not be asked again every day.
+      await this.ingestService.markCoverageAttempted(target.leagueExternalId, target.season);
+      await job.progress(Math.round(((i + 1) / wanted.length) * 100));
+    }
+
+    this.logger.log(
+      `Coverage: ${covered} of ${wanted.length} league-seasons backfilled — ` +
+        `${fixtures} fixtures, ${finished} finished` +
+        (quotaStopped ? ' (stopped: provider quota exhausted)' : ''),
+    );
+
+    return { covered, attempted: wanted.length, fixtures, finished, quotaStopped };
   }
 
   /**
