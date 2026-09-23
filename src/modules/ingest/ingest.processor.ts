@@ -5,6 +5,14 @@ import { Job, Queue } from 'bull';
 import { IngestService } from './ingest.service';
 import { ApiFootballQuotaExhausted } from './adapters/api-football.adapter';
 import { ProbabilityService } from '@/modules/probability/probability.service';
+import { ApiFootballAdapter } from './adapters/api-football.adapter';
+
+/**
+ * One sweep per hour, whoever asks. The daily chain and the admin button
+ * both queue it, and two sweeps running side by side synced the same 40
+ * teams twice — every provider request paid for twice over.
+ */
+const sweepJobId = () => `team-stats-sweep:${new Date().toISOString().slice(0, 13)}`;
 
 /**
  * Bull queue processor for ingest jobs.
@@ -47,7 +55,11 @@ export class IngestProcessor {
 
     // Fixtures alone produce nothing a user can see: the probability engine
     // needs match history, and markets only exist once it has run. Queue both.
-    await this.ingestQueue.add('team-stats-sweep', {}, { attempts: 2 });
+    await this.ingestQueue.add(
+      'team-stats-sweep',
+      {},
+      { attempts: 2, jobId: sweepJobId(), removeOnComplete: true },
+    );
 
     return { totalProcessed };
   }
@@ -62,6 +74,16 @@ export class IngestProcessor {
   @Process('team-stats-sweep')
   async handleTeamStatsSweep(job: Job<{ maxTeams?: number }>) {
     const maxTeams = job.data?.maxTeams ?? 40;
+
+    // One fixtures request per team buys nothing when the provider will not
+    // return the statistics those fixtures are fetched for.
+    if (ApiFootballAdapter.statisticsState().unavailable) {
+      this.logger.warn(
+        'Team stats sweep skipped: the provider is returning no per-fixture statistics on this plan.',
+      );
+      return { synced: 0, skipped: 0, note: 'provider statistics unavailable' };
+    }
+
     const teams = await this.ingestService.getTeamsNeedingStats(72);
 
     let synced = 0;
@@ -85,7 +107,12 @@ export class IngestProcessor {
       await job.progress(Math.round((synced / Math.min(teams.length, maxTeams)) * 100));
     }
 
-    this.logger.log(`Team stats sweep: ${synced} synced, ${skipped} still fresh`);
+    this.logger.log(
+      `Team stats sweep: ${synced} synced, ${skipped} still fresh` +
+        (ApiFootballAdapter.statisticsState().unavailable
+          ? ' — stopped early: no per-fixture statistics on this plan'
+          : ''),
+    );
 
     // Now that history exists, compute probabilities — but only for events
     // whose teams actually have some. Queueing the rest produced one skip

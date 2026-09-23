@@ -8,6 +8,7 @@ import {
   type Selectable,
 } from './cluster-selection';
 import { marketScope } from './market-definitions';
+import { tierOf, type ClusterType } from './cluster-tiers';
 import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
 
 /**
@@ -23,6 +24,18 @@ import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
  * is their decision; the combined probability is shown so that decision is an
  * informed one.
  */
+/** The snapshot fields cluster assembly reads. */
+interface SnapshotRow {
+  id: string;
+  eventId: string;
+  hitRate: number;
+  lift: number;
+  strengthScore: number;
+  event: { leagueId: string };
+  streakCandidate: { marketDefinitionId: string; survivedGate: boolean };
+}
+
+/** What a cluster's type means to the reader. */
 @Injectable()
 export class ClustersService {
   private readonly logger = new Logger(ClustersService.name);
@@ -44,10 +57,12 @@ export class ClustersService {
     size?: number;
     count?: number;
     requireDistinctLeague?: boolean;
+    includeSuggestive?: boolean;
   }) {
     const size = Math.min(options?.size ?? this.DEFAULT_SIZE, this.MAX_SIZE);
     const count = options?.count ?? 3;
     const requireDistinctLeague = options?.requireDistinctLeague ?? false;
+    const includeSuggestive = options?.includeSuggestive ?? true;
 
     const day = options?.date ? new Date(options.date) : new Date();
     const start = new Date(day);
@@ -60,12 +75,13 @@ export class ClustersService {
       select: {
         id: true,
         hitRate: true,
+        lift: true,
         strengthScore: true,
         eventId: true,
         event: { select: { leagueId: true } },
-        streakCandidate: { select: { marketDefinitionId: true } },
+        streakCandidate: { select: { marketDefinitionId: true, survivedGate: true } },
       },
-      orderBy: { strengthScore: 'desc' },
+      orderBy: [{ strengthScore: 'desc' }, { lift: 'desc' }],
     });
 
     if (snapshots.length === 0) {
@@ -79,36 +95,46 @@ export class ClustersService {
     });
 
     const used = new Set<string>();
-    const clusters: Selectable[][] = [];
+    const clusters: Array<{ components: Selectable[]; type: ClusterType }> = [];
 
-    // Flatten to the shape the selection rules work on.
-    const pool = snapshots.map((s) => ({
-      id: s.id,
-      eventId: s.eventId,
-      leagueId: s.event.leagueId,
-      marketDefinitionId: s.streakCandidate.marketDefinitionId,
-      hitRate: s.hitRate,
-      strengthScore: s.strengthScore,
-    }));
+    // Flatten to the shape the selection rules work on. A suggestive snapshot
+    // has no strength score (that is only awarded past the gate), so it is
+    // ranked on lift instead — and never mixed into a gated cluster.
+    const flatten = (rows: SnapshotRow[]): Selectable[] =>
+      rows.map((s) => ({
+        id: s.id,
+        eventId: s.eventId,
+        leagueId: s.event.leagueId,
+        marketDefinitionId: s.streakCandidate.marketDefinitionId,
+        hitRate: s.hitRate,
+        strengthScore: s.strengthScore || s.lift,
+      }));
 
-    for (let i = 0; i < count; i++) {
-      const picked = pickDiverseComponents(pool, {
-        size,
-        requireDistinctLeague,
-        used,
-      });
-      if (picked.length < MIN_CLUSTER_SIZE) break;
-      picked.forEach((p) => used.add(p.id));
-      clusters.push(picked);
-    }
+    const rows: SnapshotRow[] = snapshots;
+    const gated = flatten(rows.filter((s) => s.streakCandidate.survivedGate));
+    const suggestive = flatten(rows.filter((s) => !s.streakCandidate.survivedGate));
+
+    const fill = (pool: Selectable[], type: ClusterType, want: number) => {
+      for (let i = 0; i < want; i++) {
+        const picked = pickDiverseComponents(pool, { size, requireDistinctLeague, used });
+        if (picked.length < MIN_CLUSTER_SIZE) break;
+        picked.forEach((p) => used.add(p.id));
+        clusters.push({ components: picked, type });
+      }
+    };
+
+    // Evidence first. Suggestive clusters only fill the space the gated ones
+    // left, so a day with real findings never shows a weaker one above them.
+    fill(gated, 'DAILY_STRONGEST', count);
+    if (includeSuggestive) fill(suggestive, 'DAILY_SUGGESTIVE', count - clusters.length);
 
     let created = 0;
 
-    for (const components of clusters) {
+    for (const { components, type } of clusters) {
       const cluster = await this.prisma.cluster.create({
         data: {
           date: start,
-          type: 'DAILY_STRONGEST',
+          type,
           componentCount: components.length,
           combinedProbability: combinedProbability(components),
           status: StreakStatus.NEW,
@@ -126,17 +152,25 @@ export class ClustersService {
       created++;
     }
 
+    const strongest = clusters.filter((c) => c.type === 'DAILY_STRONGEST').length;
+    const suggested = clusters.length - strongest;
+
     this.logger.log(
-      `Built ${created} clusters for ${start.toISOString().slice(0, 10)} from ${snapshots.length} snapshots`,
+      `Built ${created} clusters for ${start.toISOString().slice(0, 10)} ` +
+        `(${strongest} evidence-backed, ${suggested} suggestive) from ${snapshots.length} snapshots`,
     );
 
     return {
       created,
+      strongest,
+      suggestive: suggested,
       snapshotsConsidered: snapshots.length,
       note:
         created === 0
           ? 'Not enough diverse snapshots to form a cluster — each component must come from a different event and a different market.'
-          : 'Combined probability assumes independence and is an approximation.',
+          : suggested > 0 && strongest === 0
+            ? 'Nothing cleared the gate today, so these are suggestive: strong recent form that has not been shown to be more than luck. Combined probability assumes independence and is an approximation.'
+            : 'Combined probability assumes independence and is an approximation.',
     };
   }
 
@@ -181,7 +215,8 @@ export class ClustersService {
           },
         },
       },
-      orderBy: { combinedProbability: 'desc' },
+      // Evidence-backed clusters always come before suggestive ones.
+      orderBy: [{ type: 'asc' }, { combinedProbability: 'desc' }],
     });
 
     // Name the club each component is about. A team market read against a
@@ -207,6 +242,9 @@ export class ClustersService {
 
     const decorated = clusters.map((cluster) => ({
       ...cluster,
+      // Say plainly which kind of cluster this is. A suggestive one read as
+      // an evidence-backed one is the whole risk of showing it at all.
+      ...tierOf(cluster.type),
       components: cluster.components.map((c) => {
         const sc = c.snapshot.streakCandidate;
         const scope = marketScope(sc.marketDefinition.marketId);

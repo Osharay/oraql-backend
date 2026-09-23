@@ -25,7 +25,7 @@ export class PerformanceService {
     const end = new Date(day);
     end.setHours(23, 59, 59, 999);
 
-    const snapshots = await this.prisma.streakSnapshot.findMany({
+    const all = await this.prisma.streakSnapshot.findMany({
       where: {
         kickoffAt: { gte: start, lte: end },
         ...(displayedOnly ? { wasDisplayed: true } : {}),
@@ -35,18 +35,29 @@ export class PerformanceService {
         baselineRate: true,
         hitRate: true,
         strengthScore: true,
+        streakCandidate: { select: { survivedGate: true } },
         result: { select: { result: true, realisedLift: true } },
       },
     });
 
-    const settled = snapshots.filter((s) => s.result);
-    const scored = settled.filter((s) => s.result!.result !== ObservationResult.VOID);
-    const wins = scored.filter((s) => s.result!.result === ObservationResult.WIN).length;
+    // Suggestive picks are measured, never counted in the headline. Mixing
+    // them in would make the engine's record say something it has not earned.
+    const snapshots = all.filter((s) => s.streakCandidate.survivedGate);
+    const suggestiveSnapshots = all.filter((s) => !s.streakCandidate.survivedGate);
 
-    const observedRate = scored.length ? wins / scored.length : null;
-    const expectedRate = scored.length
-      ? scored.reduce((sum, s) => sum + s.baselineRate, 0) / scored.length
-      : null;
+    const score = (rows: typeof all) => {
+      const settled = rows.filter((s) => s.result);
+      const scored = settled.filter((s) => s.result!.result !== ObservationResult.VOID);
+      const wins = scored.filter((s) => s.result!.result === ObservationResult.WIN).length;
+      const observedRate = scored.length ? wins / scored.length : null;
+      const expectedRate = scored.length
+        ? scored.reduce((sum, s) => sum + s.baselineRate, 0) / scored.length
+        : null;
+      return { settled, scored, wins, observedRate, expectedRate };
+    };
+
+    const { settled, scored, wins, observedRate, expectedRate } = score(snapshots);
+    const sug = score(suggestiveSnapshots);
 
     return {
       date: start.toISOString().slice(0, 10),
@@ -63,6 +74,20 @@ export class PerformanceService {
       // already do on its own.
       realisedLift:
         observedRate != null && expectedRate != null ? observedRate - expectedRate : null,
+      // Kept apart deliberately, so the suggestive tier can be judged on its
+      // own record rather than borrowing the gated one's.
+      suggestive: {
+        selections: suggestiveSnapshots.length,
+        settled: sug.settled.length,
+        wins: sug.wins,
+        losses: sug.scored.length - sug.wins,
+        observedRate: sug.observedRate,
+        expectedRate: sug.expectedRate,
+        realisedLift:
+          sug.observedRate != null && sug.expectedRate != null
+            ? sug.observedRate - sug.expectedRate
+            : null,
+      },
     };
   }
 

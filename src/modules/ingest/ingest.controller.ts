@@ -54,10 +54,16 @@ export class IngestController {
   async runStats(
     @Body() body: { maxTeams?: number },
   ) {
+    // Same job id as the scheduled sweep for this hour: pressing the button
+    // while one is already running joins it instead of doubling the spend.
     const job = await this.ingestQueue.add(
       'team-stats-sweep',
       { maxTeams: body?.maxTeams },
-      { attempts: 1 },
+      {
+        attempts: 1,
+        jobId: `team-stats-sweep:${new Date().toISOString().slice(0, 13)}`,
+        removeOnComplete: true,
+      },
     );
     return { queued: 'team-stats-sweep', jobId: job.id };
   }

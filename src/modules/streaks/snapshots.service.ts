@@ -28,6 +28,11 @@ export class SnapshotsService {
   /** How many snapshots per day are actually surfaced to users. */
   private readonly DISPLAY_LIMIT = 10;
 
+  /** A suggestive slice must at least clear these, or it is noise. */
+  private readonly SUGGESTIVE_MIN_LIFT = 0.08;
+  private readonly SUGGESTIVE_MIN_SAMPLE = 30;
+  private readonly SUGGESTIVE_LIMIT = 200;
+
   constructor(private readonly prisma: PrismaService) {}
 
   /**
@@ -41,10 +46,12 @@ export class SnapshotsService {
     windowHours?: number;
     cutoffMinutes?: number;
     displayLimit?: number;
+    includeSuggestive?: boolean;
   }) {
     const windowHours = options?.windowHours ?? this.WINDOW_HOURS;
     const cutoffMinutes = options?.cutoffMinutes ?? this.CUTOFF_MINUTES;
     const displayLimit = options?.displayLimit ?? this.DISPLAY_LIMIT;
+    const includeSuggestive = options?.includeSuggestive ?? true;
 
     const run = await this.prisma.engineRun.findFirst({
       where: { completedAt: { not: null } },
@@ -56,24 +63,54 @@ export class SnapshotsService {
       return { captured: 0, displayed: 0, skippedPastCutoff: 0, note: 'No completed engine run' };
     }
 
-    const candidates = await this.prisma.streakCandidate.findMany({
+    const select = {
+      id: true,
+      entityId: true,
+      marketDefinitionId: true,
+      selection: true,
+      hitRate: true,
+      baselineRate: true,
+      lift: true,
+      sampleSize: true,
+      currentStreak: true,
+      strengthScore: true,
+      survivedGate: true,
+    };
+
+    const survivors = await this.prisma.streakCandidate.findMany({
       where: { engineRunId: run.id, survivedGate: true },
-      select: {
-        id: true,
-        entityId: true,
-        marketDefinitionId: true,
-        selection: true,
-        hitRate: true,
-        baselineRate: true,
-        lift: true,
-        sampleSize: true,
-        currentStreak: true,
-        strengthScore: true,
-      },
+      select,
     });
 
+    // Slices that beat their baseline by a clear margin on a real sample but
+    // did not clear the multiple-comparison gate. They are captured so the
+    // Clusters page has something on a day nothing survives — and, more to
+    // the point, so their record is settled and measured exactly like the
+    // survivors'. If suggestive picks do not beat their baselines over a few
+    // hundred settled snapshots, that shows, and it should.
+    const suggestive = includeSuggestive
+      ? await this.prisma.streakCandidate.findMany({
+          where: {
+            engineRunId: run.id,
+            survivedGate: false,
+            lift: { gte: this.SUGGESTIVE_MIN_LIFT },
+            sampleSize: { gte: this.SUGGESTIVE_MIN_SAMPLE },
+          },
+          orderBy: { lift: 'desc' },
+          take: this.SUGGESTIVE_LIMIT,
+          select,
+        })
+      : [];
+
+    const candidates = [...survivors, ...suggestive];
+
     if (candidates.length === 0) {
-      return { captured: 0, displayed: 0, skippedPastCutoff: 0, note: 'No candidates survived the gate' };
+      return {
+        captured: 0,
+        displayed: 0,
+        skippedPastCutoff: 0,
+        note: 'No candidates survived the gate, and none were close enough to capture as suggestive',
+      };
     }
 
     const byTeam = new Map<string, typeof candidates>();
@@ -164,8 +201,15 @@ export class SnapshotsService {
 
     // Mark the strongest as displayed — the feed is deliberately short, and
     // only what was actually shown should be judged later.
+    // Only gated survivors are ever "displayed". The daily performance
+    // report reads displayed snapshots, so suggestive picks can never flatter
+    // the headline record.
     const top = await this.prisma.streakSnapshot.findMany({
-      where: { kickoffAt: { gt: now }, wasDisplayed: false },
+      where: {
+        kickoffAt: { gt: now },
+        wasDisplayed: false,
+        streakCandidate: { survivedGate: true },
+      },
       orderBy: { strengthScore: 'desc' },
       take: displayLimit,
       select: { id: true },
@@ -181,12 +225,15 @@ export class SnapshotsService {
     );
 
     this.logger.log(
-      `Captured ${fresh.length} snapshots, displayed ${top.length}, skipped ${skippedPastCutoff} past cutoff`,
+      `Captured ${fresh.length} snapshots (${survivors.length} gated, ${suggestive.length} suggestive candidates), ` +
+        `displayed ${top.length}, skipped ${skippedPastCutoff} past cutoff`,
     );
 
     return {
       captured: fresh.length,
       displayed: top.length,
+      gatedCandidates: survivors.length,
+      suggestiveCandidates: suggestive.length,
       skippedPastCutoff,
       note: 'ok',
     };
