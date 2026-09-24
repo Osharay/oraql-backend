@@ -6,6 +6,8 @@ import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
 import { FormService, type TeamMarketForm } from './form.service';
 import {
   BoardSort,
+  EVIDENCE_FLOOR,
+  meetsFloor,
   CONFIDENCE_NOTE,
   combineSides,
   compareBoard,
@@ -189,7 +191,8 @@ export class BoardService {
 
     rows.sort(compareBoard(sort));
 
-    const measured = rows.filter((r) => r.played > 0).length;
+    const measured = rows.filter((r) => meetsFloor(r.played)).length;
+    const someHistory = rows.filter((r) => r.played > 0).length;
     const limit = Math.min(options.limit ?? rows.length, rows.length);
 
     return {
@@ -204,9 +207,12 @@ export class BoardService {
       sort,
       markets: rows.length,
       measured,
+      someHistory,
+      evidenceFloor: EVIDENCE_FLOOR,
       lookbackDays: home.lookbackDays,
       caveat:
-        `${measured} of ${rows.length} markets have settled history behind them for this fixture. ` +
+        `${measured} of ${rows.length} markets have enough history to measure for this fixture ` +
+        `(at least ${EVIDENCE_FLOOR} settled matches each; ${someHistory - measured} more have some, but too little). ` +
         'Every rate is pulled towards the market’s usual rate in proportion to how little is behind it, ' +
         'so a short perfect run reads as a lean, not a certainty. These are records, not prices: ' +
         'a high number is only worth acting on if the odds are longer than it.',

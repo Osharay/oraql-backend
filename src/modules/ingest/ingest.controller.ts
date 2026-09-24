@@ -68,6 +68,21 @@ export class IngestController {
     return { queued: 'team-stats-sweep', jobId: job.id };
   }
 
+  @Post('competitions/seed')
+  @ApiOperation({
+    summary:
+      'Seed the target competition list and resolve each provider id from one /leagues request',
+  })
+  async seedCompetitions(@Body() body?: { season?: number }) {
+    return this.ingestService.seedTargetCompetitions({ season: body?.season });
+  }
+
+  @Get('competitions')
+  @ApiOperation({ summary: 'The target competitions, with how much settled history each holds' })
+  async listCompetitions() {
+    return this.ingestService.listTargetCompetitions();
+  }
+
   @Get('provider/diagnose')
   @ApiOperation({
     summary:

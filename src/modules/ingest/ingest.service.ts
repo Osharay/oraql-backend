@@ -8,6 +8,7 @@ import { OddsApiAdapter } from './adapters/odds-api.adapter';
 import { EventStatus, IngestJobStatus, Prisma } from '@prisma/client';
 import { FixtureData } from './interfaces/data-provider.interface';
 import { compareCoverage, isWantedCompetition } from './league-quality';
+import { TARGET_COMPETITIONS, matchesSeed } from './target-competitions';
 import {
   trackedLeagueIds,
   oddsPollingEnabled,
@@ -150,16 +151,20 @@ export class IngestService {
       // Keep only the competitions we actually track. Everything downstream is
       // rate-limited per team, so a worldwide fixture list does not mean more
       // coverage — it means none of it is deep enough to use.
+      // The target list decides what we hold. Until it is seeded, fall back
+      // to TRACKED_LEAGUE_IDS and the youth/friendly filter, so a fresh
+      // deployment still behaves sensibly.
+      const targets = await this.targetExternalIds();
       const tracked = trackedLeagueIds();
-      const inScope = tracked.length
-        ? all.filter((f) => tracked.includes(String(f.leagueExternalId)))
-        : all;
 
-      // Age-group, youth and exhibition football: almost no history to
-      // measure, barely priced anywhere, and every one that reaches the
-      // engine adds a test every real finding then has to beat.
-      const fixtures = inScope.filter((f) => isWantedCompetition(f.league?.name ?? ''));
-      const dropped = inScope.length - fixtures.length;
+      const inScope = targets.size
+        ? all.filter((f) => targets.has(String(f.leagueExternalId)))
+        : tracked.length
+          ? all.filter((f) => tracked.includes(String(f.leagueExternalId)))
+          : all.filter((f) => isWantedCompetition(f.league?.name ?? ''));
+
+      const fixtures = inScope;
+      const dropped = all.length - inScope.length;
 
       let processed = 0;
 
@@ -171,8 +176,7 @@ export class IngestService {
       await this.updateJobRecord(job.id, IngestJobStatus.COMPLETED, processed);
       this.logger.log(
         `Ingested ${processed} fixtures for ${date}` +
-          (tracked.length ? ` (${all.length - inScope.length} outside tracked leagues)` : '') +
-          (dropped ? ` (${dropped} youth or friendly fixtures skipped)` : ''),
+          (dropped ? ` (${dropped} outside the target competitions)` : ''),
       );
       return processed;
     } catch (error) {
@@ -181,6 +185,157 @@ export class IngestService {
       this.logger.error(`Fixture ingest failed for ${date}: ${message}`);
       throw error;
     }
+  }
+
+  /**
+   * Seed the target competition list and resolve each one's provider id.
+   *
+   * One /leagues request returns every competition the provider knows, so
+   * matching by name and country costs a single call. Ids are never guessed:
+   * five countries run a "Premier League", and a wrong id would quietly fill
+   * a season with the wrong football.
+   */
+  async seedTargetCompetitions(options: { season?: number } = {}) {
+    const season = options.season ?? new Date().getFullYear();
+    const leagues = await this.apiFootball.getLeagues(season);
+
+    const resolved: Array<{ name: string; country: string; externalId: string }> = [];
+    const unresolved: Array<{ name: string; country: string }> = [];
+    const ambiguous: Array<{ name: string; country: string; matches: string[] }> = [];
+
+    for (const seed of TARGET_COMPETITIONS) {
+      const hits = leagues.filter((l) => matchesSeed(seed, l));
+
+      if (hits.length === 0) {
+        unresolved.push({ name: seed.name, country: seed.country });
+        await this.prisma.targetCompetition.upsert({
+          where: { externalId: `unresolved:${seed.country}:${seed.name}` },
+          create: {
+            externalId: `unresolved:${seed.country}:${seed.name}`,
+            name: seed.name,
+            country: seed.country,
+            tier: seed.tier,
+            seasons: seed.seasons,
+            isActive: false,
+            note: 'No competition of this name and country in the provider list',
+          },
+          update: { tier: seed.tier, seasons: seed.seasons },
+        });
+        continue;
+      }
+
+      if (hits.length > 1) {
+        ambiguous.push({
+          name: seed.name,
+          country: seed.country,
+          matches: hits.map((h) => `${h.externalId} ${h.name} (${h.country ?? '—'})`),
+        });
+      }
+
+      const hit = hits[0];
+      resolved.push({ name: seed.name, country: seed.country, externalId: hit.externalId });
+
+      await this.prisma.targetCompetition.upsert({
+        where: { externalId: hit.externalId },
+        create: {
+          externalId: hit.externalId,
+          name: hit.name,
+          country: hit.country ?? seed.country,
+          tier: seed.tier,
+          seasons: seed.seasons,
+          isActive: true,
+          resolvedAt: new Date(),
+          note: hits.length > 1 ? `Matched ${hits.length} competitions; took the first` : null,
+        },
+        update: {
+          name: hit.name,
+          country: hit.country ?? seed.country,
+          tier: seed.tier,
+          seasons: seed.seasons,
+          isActive: true,
+          resolvedAt: new Date(),
+        },
+      });
+    }
+
+    this.logger.log(
+      `Target competitions: ${resolved.length} resolved, ${unresolved.length} not found, ` +
+        `${ambiguous.length} ambiguous`,
+    );
+
+    return {
+      season,
+      providerLeagues: leagues.length,
+      resolved: resolved.length,
+      unresolved,
+      ambiguous,
+    };
+  }
+
+  /** Provider ids of the competitions we cover, cached for a minute. */
+  private targetIdCache: { ids: Set<string>; at: number } | null = null;
+
+  async targetExternalIds(): Promise<Set<string>> {
+    if (this.targetIdCache && Date.now() - this.targetIdCache.at < 60_000) {
+      return this.targetIdCache.ids;
+    }
+    const rows = await this.prisma.targetCompetition.findMany({
+      where: { isActive: true, externalId: { not: null } },
+      select: { externalId: true },
+    });
+    const ids = new Set<string>(
+      rows
+        .map((r) => String(r.externalId))
+        .filter((id: string) => !id.startsWith('unresolved:')),
+    );
+    this.targetIdCache = { ids, at: Date.now() };
+    return ids;
+  }
+
+  /** The list as it stands, for the admin page. */
+  async listTargetCompetitions() {
+    const rows = await this.prisma.targetCompetition.findMany({
+      orderBy: [{ tier: 'asc' }, { name: 'asc' }],
+      select: {
+        externalId: true,
+        name: true,
+        country: true,
+        tier: true,
+        seasons: true,
+        isActive: true,
+        coveredAt: true,
+        note: true,
+      },
+    });
+
+    // How much settled history each target actually holds — the number that
+    // says whether a competition is ready to be measured.
+    const counts = await this.prisma.event.groupBy({
+      by: ['leagueId'],
+      where: { status: EventStatus.FINISHED },
+      _count: { _all: true },
+    });
+    const leagues = await this.prisma.league.findMany({
+      select: { id: true, externalId: true },
+    });
+    const byExternal = new Map(leagues.map((l) => [l.id, l.externalId]));
+    const finishedByExternal = new Map<string, number>();
+    for (const c of counts) {
+      const ext = byExternal.get(c.leagueId);
+      if (ext) finishedByExternal.set(ext, (finishedByExternal.get(ext) ?? 0) + c._count._all);
+    }
+
+    const withHistory = rows.map((r) => ({
+      ...r,
+      finishedMatches: r.externalId ? (finishedByExternal.get(r.externalId) ?? 0) : 0,
+    }));
+
+    return {
+      total: rows.length,
+      active: rows.filter((r) => r.isActive).length,
+      ready: withHistory.filter((r) => r.finishedMatches >= 100).length,
+      competitions: withHistory,
+    };
   }
 
   /** Redis key marking a league-season as recently attempted. */
@@ -204,13 +359,94 @@ export class IngestService {
    * which stops a competition the provider has no history for from being
    * requested again every single day.
    */
-  async leagueSeasonsNeedingHistory(options: {
-    days?: number;
-    minFinished?: number;
-    budget?: number;
-    seasons?: number;
-    ignoreCooldown?: boolean;
-  } = {}): Promise<Array<{ leagueExternalId: string; season: number; name: string }>> {
+  async leagueSeasonsNeedingHistory(
+    options: {
+      days?: number;
+      minFinished?: number;
+      budget?: number;
+      seasons?: number;
+      ignoreCooldown?: boolean;
+    } = {},
+  ): Promise<Array<{ leagueExternalId: string; season: number; name: string }>> {
+    const minFinished = options.minFinished ?? 100;
+    const budget = options.budget ?? coverageBudget();
+    const overrideDepth = options.seasons;
+
+    const targets = await this.prisma.targetCompetition.findMany({
+      where: { isActive: true, externalId: { not: null } },
+      orderBy: [{ tier: 'asc' }, { name: 'asc' }],
+      select: { externalId: true, name: true, tier: true, seasons: true },
+    });
+
+    // Nothing seeded yet: fall back to the old behaviour so a fresh
+    // deployment is not silently doing nothing.
+    if (targets.length === 0) {
+      return this.leagueSeasonsFromFixtures(options);
+    }
+
+    // How much settled history each target already holds.
+    const leagues = await this.prisma.league.findMany({
+      where: { externalId: { in: targets.map((t) => t.externalId as string) } },
+      select: { id: true, externalId: true },
+    });
+    const idByExternal = new Map<string, string>(
+      leagues.map((l) => [String(l.externalId), String(l.id)]),
+    );
+
+    const counts = leagues.length
+      ? await this.prisma.event.groupBy({
+          by: ['leagueId'],
+          where: { status: EventStatus.FINISHED, leagueId: { in: leagues.map((l) => l.id) } },
+          _count: { _all: true },
+        })
+      : [];
+    const finishedById = new Map<string, number>(
+      counts.map((c) => [String(c.leagueId), Number(c._count._all)]),
+    );
+
+    const currentSeason = new Date().getFullYear();
+    const wanted: Array<{ leagueExternalId: string; season: number; name: string }> = [];
+    const client = options.ignoreCooldown ? null : await this.coverageRedis();
+
+    // Tier order, then the thinnest first: a competition with nothing gets
+    // filled before one that is merely a season short.
+    const ordered = [...targets].sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier - b.tier;
+      const held = (t: typeof a): number =>
+        finishedById.get(String(idByExternal.get(String(t.externalId)))) ?? 0;
+      return held(a) - held(b);
+    });
+
+    for (const target of ordered) {
+      const externalId = target.externalId as string;
+      const held: number = finishedById.get(String(idByExternal.get(externalId))) ?? 0;
+      const depth = overrideDepth ?? target.seasons;
+
+      // A competition that already holds plenty is not refetched every day;
+      // the current season still is, since it keeps growing.
+      const seasonsToFetch = held >= minFinished ? 1 : depth;
+
+      for (let i = 0; i < seasonsToFetch; i++) {
+        if (wanted.length >= budget) return wanted;
+        const season = currentSeason - i;
+        if (client) {
+          const seen = await client.get(IngestService.coverageKey(externalId, season));
+          if (seen) continue;
+        }
+        wanted.push({ leagueExternalId: externalId, season, name: target.name });
+      }
+    }
+
+    return wanted;
+  }
+
+  /**
+   * The old rule: leagues of the fixtures coming up that hold little history.
+   * Kept as the fallback for a deployment whose target list is not seeded.
+   */
+  private async leagueSeasonsFromFixtures(
+    options: { days?: number; minFinished?: number; budget?: number; seasons?: number; ignoreCooldown?: boolean } = {},
+  ): Promise<Array<{ leagueExternalId: string; season: number; name: string }>> {
     const days = options.days ?? 7;
     const minFinished = options.minFinished ?? 50;
     const budget = options.budget ?? coverageBudget();
@@ -227,7 +463,6 @@ export class IngestService {
 
     if (upcoming.length === 0) return [];
 
-    // How much settled history each of those leagues already has.
     const finished = await this.prisma.event.groupBy({
       by: ['leagueId'],
       where: {
@@ -246,7 +481,6 @@ export class IngestService {
     >();
     for (const e of upcoming) {
       if ((finishedByLeague.get(e.leagueId) ?? 0) >= minFinished) continue;
-      // Nothing we would not hold a fixture for is worth a backfill request.
       if (!isWantedCompetition(e.league.name)) continue;
 
       const seen = leagues.get(e.league.externalId);
@@ -262,9 +496,6 @@ export class IngestService {
       });
     }
 
-    // Busiest serious competitions first: a budget of 100 requests should
-    // reach the leagues with twenty fixtures this week before a cup tie in a
-    // third division.
     const ordered = [...leagues.values()].sort((a, b) =>
       compareCoverage(
         { leagueExternalId: a.externalId, name: a.name, upcoming: a.upcoming },

@@ -1,4 +1,6 @@
 import {
+  EVIDENCE_FLOOR,
+  meetsFloor,
   shrunkRate,
   combineSides,
   confidenceOf,
@@ -86,6 +88,14 @@ describe('confidenceOf', () => {
   });
 });
 
+describe('the evidence floor', () => {
+  it('is ten settled matches', () => {
+    expect(EVIDENCE_FLOOR).toBe(10);
+    expect(meetsFloor(9)).toBe(false);
+    expect(meetsFloor(10)).toBe(true);
+  });
+});
+
 describe('compareBoard', () => {
   const row = (over: Partial<BoardRow>): BoardRow => ({
     probability: 0.5,
@@ -95,6 +105,16 @@ describe('compareBoard', () => {
     confidence: 'medium',
     currentRun: 0,
     ...over,
+  });
+
+  // The Andorra v Malta board ranked 1/1 rows above everything under "Most
+  // likely". Evidence comes first now, whatever the sort.
+  it('never ranks a row below the floor above one above it', () => {
+    const thin = row({ probability: 0.95, played: 2, confidence: 'low', edge: 0.4, currentRun: 9 });
+    const solid = row({ probability: 0.62, played: 40, confidence: 'high', edge: 0.05 });
+    for (const sort of ['probability', 'edge', 'run', 'confidence'] as const) {
+      expect([thin, solid].sort(compareBoard(sort))[0]).toBe(solid);
+    }
   });
 
   it('ranks by probability by default', () => {

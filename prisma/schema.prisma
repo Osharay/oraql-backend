@@ -85,6 +85,37 @@ enum Sport {
   HOCKEY
 }
 
+/// The competitions OraQL covers on purpose.
+///
+/// Coverage used to follow whatever fixtures happened to arrive, which meant
+/// history for U19 leagues and Romanian third divisions and none for the
+/// leagues people bet. This table is the decision: what we hold, how deep,
+/// and in what order to fetch it. Editable without a deploy, because the
+/// client will add and drop competitions as his audience changes.
+model TargetCompetition {
+  id           String   @id @default(uuid())
+  /// API-Football league id, resolved from name + country at seed time.
+  externalId   String?  @unique
+  name         String
+  country      String?
+  /// 1 = deepest history, 2 = standard, 3 = cups and international.
+  tier         Int      @default(2)
+  /// Seasons of fixtures to hold. Observations are windowed separately.
+  seasons      Int      @default(4)
+  isActive     Boolean  @default(true)
+  /// Set when the provider's league list confirmed the id.
+  resolvedAt   DateTime?
+  /// Last time coverage completed a backfill pass for this competition.
+  coveredAt    DateTime?
+  note         String?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([isActive, tier])
+  @@map("target_competitions")
+}
+
 model League {
   id              String   @id @default(uuid())
   externalId      String   @unique  // API-Football league id

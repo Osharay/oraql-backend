@@ -65,6 +65,19 @@ export function combineSides(sides: SideEvidence[], baseline: number | null, k =
  * board shows them and says so, rather than hiding them and implying the rest
  * are all equally solid.
  */
+/**
+ * Matches a row needs before it is shown or ranked at all.
+ *
+ * Andorra v Malta reported "98 of 103 markets have settled history" when
+ * every row rested on one or two matches — and, because a rate that thin is
+ * pulled almost entirely back to the market's own average, both teams showed
+ * the same number down the page. That is not a measurement; it is the
+ * baseline wearing a fixture's name.
+ */
+export const EVIDENCE_FLOOR = 10;
+
+export const meetsFloor = (played: number): boolean => played >= EVIDENCE_FLOOR;
+
 export function confidenceOf(played: number): Confidence {
   if (played <= 0) return 'none';
   if (played < 10) return 'low';
@@ -94,6 +107,13 @@ export function compareBoard(sort: BoardSort = 'probability') {
   const rank: Record<Confidence, number> = { high: 3, medium: 2, low: 1, none: 0 };
 
   return (a: BoardRow, b: BoardRow): number => {
+    // Evidence band first, before any sort: a 12-match row at 68% outranks a
+    // 2-match row at 85% whichever sort is chosen, because the second is not
+    // a measurement of anything.
+    const aFloor = meetsFloor(a.played);
+    const bFloor = meetsFloor(b.played);
+    if (aFloor !== bFloor) return aFloor ? -1 : 1;
+
     if (sort === 'edge') {
       const ae = a.edge ?? -1;
       const be = b.edge ?? -1;
@@ -106,8 +126,6 @@ export function compareBoard(sort: BoardSort = 'probability') {
       return rank[b.confidence] - rank[a.confidence];
     }
 
-    // A row with nothing behind it never outranks one with evidence, whatever
-    // its smoothed probability says.
     if ((a.confidence === 'none') !== (b.confidence === 'none')) {
       return a.confidence === 'none' ? 1 : -1;
     }
