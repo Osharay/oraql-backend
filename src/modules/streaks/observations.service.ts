@@ -180,6 +180,149 @@ export class ObservationsService {
   }
 
   /**
+   * The active market registry, read once a minute instead of once a match.
+   *
+   * Deriving asked the database for all 70 definitions on every single event:
+   * 15,000 matches meant 15,000 identical queries. The registry changes when
+   * an admin syncs it, so a minute of staleness costs nothing.
+   */
+  private definitionCache: {
+    at: number;
+    rows: Array<{ id: string; marketId: string }>;
+  } | null = null;
+
+  private async activeDefinitions(): Promise<Array<{ id: string; marketId: string }>> {
+    if (this.definitionCache && Date.now() - this.definitionCache.at < 60_000) {
+      return this.definitionCache.rows;
+    }
+    const rows = await this.prisma.marketDefinition.findMany({
+      where: { isActive: true },
+      select: { id: true, marketId: true },
+    });
+    this.definitionCache = { at: Date.now(), rows };
+    return rows;
+  }
+
+  /**
+   * Derive a whole batch of matches in a handful of queries.
+   *
+   * The per-match path asked the database four questions for every match —
+   * the event, the registry, what was already recorded, then the insert —
+   * so a 15,000-match run made about 60,000 round trips and took hours. This
+   * reads the batch in three queries and writes it in chunks, which is where
+   * nearly all of that time was going.
+   */
+  async deriveBatch(eventIds: string[]): Promise<number> {
+    if (eventIds.length === 0) return 0;
+
+    const [definitions, events, existing] = await Promise.all([
+      this.activeDefinitions(),
+      this.prisma.event.findMany({
+        where: { id: { in: eventIds } },
+        include: {
+          league: { select: { id: true, season: true } },
+          matchStats: true,
+        },
+      }),
+      this.prisma.marketObservation.findMany({
+        where: { eventId: { in: eventIds } },
+        select: {
+          eventId: true,
+          marketDefinitionId: true,
+          selection: true,
+          result: true,
+          revision: true,
+        },
+      }),
+    ]);
+
+    const defIdByMarketId = new Map<string, string>(
+      definitions.map((d) => [String(d.marketId), String(d.id)]),
+    );
+
+    // eventId -> "definition:selection" -> latest recorded result
+    const latestByEvent = new Map<string, Map<string, { result: string; revision: number }>>();
+    for (const e of existing) {
+      const key = `${e.marketDefinitionId}:${e.selection}`;
+      const forEvent = latestByEvent.get(String(e.eventId)) ?? new Map();
+      const prev = forEvent.get(key);
+      if (!prev || Number(e.revision) > prev.revision) {
+        forEvent.set(key, { result: String(e.result), revision: Number(e.revision) });
+      }
+      latestByEvent.set(String(e.eventId), forEvent);
+    }
+
+    const rows: Prisma.MarketObservationCreateManyInput[] = [];
+
+    for (const event of events) {
+      if (event.status !== EventStatus.FINISHED) continue;
+
+      const homeGoals = event.ftHomeScore ?? event.homeScore;
+      const awayGoals = event.ftAwayScore ?? event.awayScore;
+      if (homeGoals == null || awayGoals == null) continue;
+
+      const homeStats = event.matchStats.find((st: any) => st.teamId === event.homeTeamId);
+      const awayStats = event.matchStats.find((st: any) => st.teamId === event.awayTeamId);
+      const hasStats = Boolean(homeStats && awayStats);
+
+      const outcome: MatchOutcome = {
+        homeGoals,
+        awayGoals,
+        htHomeGoals: event.htHomeScore ?? null,
+        htAwayGoals: event.htAwayScore ?? null,
+        homeCorners: homeStats?.corners ?? null,
+        awayCorners: awayStats?.corners ?? null,
+        homeYellowCards: homeStats?.yellowCards ?? null,
+        awayYellowCards: awayStats?.yellowCards ?? null,
+      };
+
+      const latest = latestByEvent.get(String(event.id)) ?? new Map();
+
+      for (const def of MARKET_DEFINITIONS) {
+        const definitionId = defIdByMarketId.get(def.marketId);
+        if (!definitionId) continue;
+        if (!hasStats && def.requires.some((r) => r === 'corners' || r === 'cards')) continue;
+
+        for (const side of def.selections) {
+          const result = def.evaluate(outcome, side as Selection);
+          const revision = nextRevision(latest.get(`${definitionId}:${side}`), result);
+          if (revision === null) continue;
+
+          rows.push({
+            eventId: event.id,
+            marketDefinitionId: definitionId,
+            selection: side as ObservationSelection,
+            line: def.line,
+            result: result as ObservationResult,
+            leagueId: event.league.id,
+            season: event.league.season,
+            teamId:
+              side === 'HOME' ? event.homeTeamId : side === 'AWAY' ? event.awayTeamId : null,
+            isHome: side === 'MATCH' ? null : side === 'HOME',
+            kickoffAt: event.kickoffAt,
+            dataQuality: result === 'UNKNOWN' ? DataQuality.SUSPECT : DataQuality.OK,
+            revision,
+          });
+        }
+      }
+    }
+
+    // Chunked: one insert of 50,000 rows holds a long transaction and spills
+    // to the same disk the volume is short of.
+    let written = 0;
+    const CHUNK = 5_000;
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const result = await this.prisma.marketObservation.createMany({
+        data: rows.slice(i, i + CHUNK),
+        skipDuplicates: true,
+      });
+      written += result.count;
+    }
+
+    return written;
+  }
+
+  /**
    * Derive observations for one finished event.
    * Returns the number of rows written (0 if the event is not settled).
    */
@@ -321,10 +464,7 @@ export class ObservationsService {
   ): Promise<{ events: number; observations: number; refreshed: number }> {
     const { ids, refreshed } = await this.selectBatch(limit, options.refresh ?? false, []);
 
-    let observations = 0;
-    for (const id of ids) {
-      observations += await this.deriveForEvent(id);
-    }
+    const observations = await this.deriveBatch(ids);
 
     this.logger.log(
       `Derived ${observations} observations across ${ids.length} finished events` +
@@ -351,25 +491,37 @@ export class ObservationsService {
   ): Promise<{ events: number; observations: number; refreshed: number; batches: number; complete: boolean }> {
     const batch = Math.max(1, Math.min(options.batch ?? 500, 2000));
     const maxEvents = Math.max(batch, Math.min(options.maxEvents ?? 15000, 15000));
-    const seen: string[] = [];
     const totals = { events: 0, observations: 0, refreshed: 0, batches: 0 };
     let complete = false;
 
+    // Events already handled this run. Kept in memory and used to filter the
+    // batch here, with only the most recent few thousand sent to the
+    // database: passing every id seen meant a 7,000-element NOT IN by batch
+    // fifteen, growing every batch, so the run slowed as it went.
+    const seen = new Set<string>();
+    const recent: string[] = [];
+
     while (totals.events < maxEvents) {
-      const { ids, refreshed } = await this.selectBatch(
+      const selected = await this.selectBatch(
         Math.min(batch, maxEvents - totals.events),
         true,
-        seen,
+        recent.slice(-2_000),
       );
+      const ids = selected.ids.filter((id) => !seen.has(id));
+      const refreshed = selected.refreshed;
+
+      // Nothing new left — either everything is derived, or what remains
+      // cannot be completed and has already been tried this run.
       if (ids.length === 0) {
         complete = true;
         break;
       }
 
+      totals.observations += await this.deriveBatch(ids);
       for (const id of ids) {
-        totals.observations += await this.deriveForEvent(id);
+        seen.add(id);
+        recent.push(id);
       }
-      seen.push(...ids);
       totals.events += ids.length;
       totals.refreshed += refreshed;
       totals.batches += 1;
