@@ -91,6 +91,27 @@ export class StreaksController {
     return accepted(job);
   }
 
+  @Get('observations/reclaimable')
+  @UseGuards(AdminGuard)
+  @ApiOperation({
+    summary:
+      'How many observations sit outside the target competitions or the derive window, and the space they hold',
+  })
+  reclaimable() {
+    return this.observations.reclaimable();
+  }
+
+  @Post('observations/reclaim')
+  @UseGuards(AdminGuard)
+  @HttpCode(202)
+  @ApiOperation({
+    summary:
+      'Delete those observations. Fixtures and scores are kept, so widening the window derives them again.',
+  })
+  reclaim() {
+    return accepted(this.jobs.start('reclaim', () => this.observations.reclaim()));
+  }
+
   @Post('baselines/compute')
   @UseGuards(AdminGuard)
   @ApiOperation({ summary: 'Recompute market baselines from settled observations' })

@@ -9,6 +9,7 @@ import {
 } from '@prisma/client';
 import { MARKET_DEFINITIONS, MatchOutcome, Selection } from './market-definitions';
 import { nextRevision } from './observation-revision';
+import { deriveSeasons } from '@/config/app.config';
 
 /**
  * Turns finished matches into market observations.
@@ -55,6 +56,127 @@ export class ObservationsService {
     }
     this.logger.log(`Market registry synced: ${MARKET_DEFINITIONS.length} definitions`);
     return MARKET_DEFINITIONS.length;
+  }
+
+  /**
+   * What the observations table is holding, and how much of it is outside
+   * what we now measure.
+   *
+   * The disk filled while coverage followed whatever fixtures arrived: U19
+   * leagues, friendlies, third divisions, all derived at about 100 rows a
+   * match. Those rows feed nothing now that the target list decides what the
+   * product covers — but deleting is a decision for a person, so this counts
+   * first and deletes only when told.
+   */
+  async reclaimable(): Promise<{
+    totalRows: number;
+    outsideTargets: number;
+    outsideWindow: number;
+    reclaimable: number;
+    deriveSeasons: number;
+    estimatedMb: number;
+    targetsSeeded: boolean;
+  }> {
+    const since = new Date(Date.now() - deriveSeasons() * 365 * 86_400_000);
+    const targets = await this.prisma.targetCompetition.findMany({
+      where: { isActive: true, externalId: { not: null } },
+      select: { externalId: true },
+    });
+    const targetIds: string[] = targets
+      .map((t) => String(t.externalId))
+      .filter((id: string) => !id.startsWith('unresolved:'));
+
+    const [totalRows, outsideTargets, outsideWindow, reclaimable] = await Promise.all([
+      this.prisma.marketObservation.count(),
+      targetIds.length
+        ? this.prisma.marketObservation.count({
+            where: { event: { league: { externalId: { notIn: targetIds } } } },
+          })
+        : Promise.resolve(0),
+      this.prisma.marketObservation.count({ where: { kickoffAt: { lt: since } } }),
+      targetIds.length
+        ? this.prisma.marketObservation.count({
+            where: {
+              OR: [
+                { event: { league: { externalId: { notIn: targetIds } } } },
+                { kickoffAt: { lt: since } },
+              ],
+            },
+          })
+        : this.prisma.marketObservation.count({ where: { kickoffAt: { lt: since } } }),
+    ]);
+
+    return {
+      totalRows,
+      outsideTargets,
+      outsideWindow,
+      reclaimable,
+      deriveSeasons: deriveSeasons(),
+      // Measured on this database: roughly 1 GB per million rows with indexes.
+      estimatedMb: Math.round((reclaimable / 1_000_000) * 1024),
+      targetsSeeded: targetIds.length > 0,
+    };
+  }
+
+  /**
+   * Delete the observations outside the target competitions or the derive
+   * window. Fixtures and scores are kept, so any of it can be derived again
+   * by widening the window or adding the competition back.
+   */
+  async reclaim(options: { batch?: number } = {}): Promise<{
+    deleted: number;
+    batches: number;
+    remaining: number;
+  }> {
+    const batch = Math.max(1000, Math.min(options.batch ?? 20_000, 100_000));
+    const since = new Date(Date.now() - deriveSeasons() * 365 * 86_400_000);
+
+    const targets = await this.prisma.targetCompetition.findMany({
+      where: { isActive: true, externalId: { not: null } },
+      select: { externalId: true },
+    });
+    const targetIds: string[] = targets
+      .map((t) => String(t.externalId))
+      .filter((id: string) => !id.startsWith('unresolved:'));
+
+    let deleted = 0;
+    let batches = 0;
+
+    // Deleted in batches by id: one statement over two million rows would
+    // hold a long transaction and spill to the same disk we are trying to
+    // free.
+    for (;;) {
+      const doomed = await this.prisma.marketObservation.findMany({
+        where: targetIds.length
+          ? {
+              OR: [
+                { event: { league: { externalId: { notIn: targetIds } } } },
+                { kickoffAt: { lt: since } },
+              ],
+            }
+          : { kickoffAt: { lt: since } },
+        select: { id: true },
+        take: batch,
+      });
+
+      if (doomed.length === 0) break;
+
+      const result = await this.prisma.marketObservation.deleteMany({
+        where: { id: { in: doomed.map((d) => String(d.id)) } },
+      });
+      deleted += result.count;
+      batches++;
+      this.logger.log(`Reclaim: ${deleted} observations deleted so far`);
+
+      if (batches > 500) break;
+    }
+
+    const remaining = await this.prisma.marketObservation.count();
+    this.logger.log(
+      `Reclaim finished: ${deleted} observations deleted in ${batches} batches, ${remaining} remain`,
+    );
+
+    return { deleted, batches, remaining };
   }
 
   /**
@@ -264,15 +386,44 @@ export class ObservationsService {
     return { ...totals, complete };
   }
 
+  /**
+   * What we measure: finished matches in the competitions we cover, inside
+   * the derive window.
+   *
+   * Deriving everything was what filled the disk with U19 leagues and third
+   * divisions. Fixtures for those are kept — they cost almost nothing — but
+   * they are not turned into a hundred observation rows apiece.
+   */
+  private async scope(): Promise<Record<string, unknown>> {
+    const since = new Date(Date.now() - deriveSeasons() * 365 * 86_400_000);
+
+    const targets = await this.prisma.targetCompetition.findMany({
+      where: { isActive: true, externalId: { not: null } },
+      select: { externalId: true },
+    });
+    const ids = targets
+      .map((t) => String(t.externalId))
+      .filter((id: string) => !id.startsWith('unresolved:'));
+
+    return {
+      status: EventStatus.FINISHED,
+      kickoffAt: { gte: since },
+      // Until the target list is seeded, measure everything as before.
+      ...(ids.length ? { league: { externalId: { in: ids } } } : {}),
+    };
+  }
+
   /** Events with no observations first, then (optionally) incomplete ones. */
   private async selectBatch(
     limit: number,
     refresh: boolean,
     exclude: string[],
   ): Promise<{ ids: string[]; refreshed: number }> {
+    const scope = await this.scope();
+
     const fresh = await this.prisma.event.findMany({
       where: {
-        status: EventStatus.FINISHED,
+        ...scope,
         observations: { none: {} },
         ...(exclude.length ? { id: { notIn: exclude } } : {}),
       },
@@ -304,6 +455,15 @@ export class ObservationsService {
   private async findIncompleteEvents(limit: number, exclude: string[]): Promise<string[]> {
     if (limit <= 0) return [];
 
+    const since = new Date(Date.now() - deriveSeasons() * 365 * 86_400_000);
+    const targets = await this.prisma.targetCompetition.findMany({
+      where: { isActive: true, externalId: { not: null } },
+      select: { externalId: true },
+    });
+    const targetIds: string[] = targets
+      .map((t) => String(t.externalId))
+      .filter((id: string) => !id.startsWith('unresolved:'));
+
     const definitions = await this.prisma.marketDefinition.findMany({
       where: { isActive: true },
       select: { marketId: true },
@@ -324,7 +484,13 @@ export class ObservationsService {
     const rows = await this.prisma.$queryRaw<Array<{ id: string }>>`
       SELECT e.id
       FROM events e
+      JOIN leagues l ON l.id = e."leagueId"
       WHERE e.status = 'FINISHED'
+        AND e."kickoffAt" >= ${since}
+        AND (
+          ${targetIds.length} = 0
+          OR l."externalId" = ANY(${targetIds}::text[])
+        )
         AND (
           (SELECT COUNT(*) FROM (
              SELECT DISTINCT o."marketDefinitionId", o.selection

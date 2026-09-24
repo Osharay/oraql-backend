@@ -73,6 +73,19 @@ export const coverageSeasons = (): number => {
 };
 
 /**
+ * Seasons of history DERIVED into observations.
+ *
+ * Fixtures are cheap to hold — about 1 KB each — but every finished match
+ * becomes roughly 100 observation rows, and those fill the disk. So the depth
+ * we fetch and the depth we measure are separate dials: fetch six seasons,
+ * measure the most recent three, raise it when there is room.
+ */
+export const deriveSeasons = (): number => {
+  const parsed = Number(process.env.DERIVE_SEASONS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 10) : 3;
+};
+
+/**
  * Whether to poll The Odds API. Off unless ODDS_POLLING_ENABLED=true.
  *
  * Nothing consumes the odds yet: market.impliedProbability is never written,
