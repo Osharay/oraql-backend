@@ -197,7 +197,14 @@ export class IngestService {
    */
   async seedTargetCompetitions(options: { season?: number } = {}) {
     const season = options.season ?? new Date().getFullYear();
-    const leagues = await this.apiFootball.getLeagues(season);
+
+    // The full catalogue, not one season's. Resolving against season 2026
+    // missed the Euros, Copa America, AFCON and the World Cup qualifiers,
+    // none of which has a 2026 season — six competitions his audience bets
+    // heavily. One request either way.
+    const leagues = options.season
+      ? await this.apiFootball.getLeagues(season)
+      : await this.apiFootball.getAllLeagues();
 
     const resolved: Array<{ name: string; country: string; externalId: string }> = [];
     const unresolved: Array<{ name: string; country: string }> = [];

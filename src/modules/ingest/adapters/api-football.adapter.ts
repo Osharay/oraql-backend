@@ -261,6 +261,35 @@ export class ApiFootballAdapter implements IDataProvider {
     }));
   }
 
+  /**
+   * Every competition the provider knows, not just those running in one
+   * season.
+   *
+   * Resolving the target list against /leagues?season=2026 missed the Euros,
+   * Copa America, AFCON and the World Cup qualifiers — none of them has a
+   * 2026 season — so six competitions the client's audience bets heavily came
+   * back unresolved. Without the season parameter the endpoint returns the
+   * full catalogue in one request.
+   */
+  async getAllLeagues(): Promise<LeagueData[]> {
+    const raw = await this.request<any[]>('leagues', {});
+
+    return raw.map((l) => ({
+      externalId: String(l.league.id),
+      name: l.league.name,
+      country: l.country?.name,
+      countryCode: l.country?.code,
+      logoUrl: l.league.logo,
+      // The latest season the provider lists for it, for reference only.
+      season: Number(
+        (l.seasons ?? []).reduce(
+          (latest: number, s: any) => Math.max(latest, Number(s.year) || 0),
+          0,
+        ),
+      ),
+    }));
+  }
+
   async getTeams(leagueExternalId: string, season: number): Promise<TeamData[]> {
     const raw = await this.request<any[]>('teams', {
       league: leagueExternalId,
