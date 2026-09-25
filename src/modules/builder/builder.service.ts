@@ -6,6 +6,11 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
 import { describeMarket } from '@/common/market-copy';
+import { EventStatus } from '@prisma/client';
+import { combinedChance, conflictBetween } from './builder-math';
+
+/** Statuses a selection can still be added for: the match has not started. */
+const OPEN_STATUSES: EventStatus[] = [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED];
 
 @Injectable()
 export class BuilderService {
@@ -44,16 +49,20 @@ export class BuilderService {
       orderBy: { createdAt: 'asc' },
     });
 
-    // Compute combined probability (product of independent probabilities)
-    const combinedProbability = selections.reduce(
-      (acc, s) => acc * s.market.probability,
-      1,
+    // A plain product only holds across different matches. Selections that
+    // share a match move together (or imply each other), so for those the
+    // answer is a range — see combinedChance.
+    const chance = combinedChance(
+      selections.map((s) => ({ eventId: s.market.event.id, probability: s.market.probability })),
     );
 
     return {
       selections,
       count: selections.length,
-      combinedProbability: Math.round(combinedProbability * 10000) / 10000,
+      /** Null when two or more selections share a match; use combinedRange then. */
+      combinedProbability: chance.probability,
+      combinedRange: { low: chance.low, high: chance.high },
+      sharedMatches: chance.sharedMatches,
     };
   }
 
@@ -64,37 +73,32 @@ export class BuilderService {
     // Verify market exists
     const market = await this.prisma.market.findUnique({
       where: { id: marketId },
-      include: { event: { select: { id: true, status: true } } },
+      include: { event: { select: { id: true, status: true, kickoffAt: true } } },
     });
 
     if (!market) {
       throw new NotFoundException(`Market ${marketId} not found`);
     }
 
-    // Check for conflicting selections from the same event
-    const existingFromEvent = await this.prisma.builderSelection.findFirst({
-      where: {
-        userId,
-        market: { eventId: market.eventId },
-      },
-      include: { market: { select: { name: true, eventId: true } } },
+    // Only matches that have not kicked off. A finished match's outcome is
+    // known; a live one is priced on pre-match numbers that no longer apply.
+    if (!OPEN_STATUSES.includes(market.event.status) || market.event.kickoffAt <= new Date()) {
+      throw new BadRequestException('This match has already started, finished or been called off, so it can no longer be added');
+    }
+
+    // Every existing selection from the same match, not just the first, and
+    // checked in both directions so the order they were added in is irrelevant.
+    const sameMatch = await this.prisma.builderSelection.findMany({
+      where: { userId, market: { eventId: market.eventId }, NOT: { marketId } },
+      include: { market: { select: { name: true, shortName: true, category: true } } },
     });
 
-    // Allow multiple picks per event, but warn if same category
-    if (existingFromEvent) {
-      const existingMarket = await this.prisma.market.findUnique({
-        where: { id: existingFromEvent.marketId },
-      });
-      if (existingMarket && existingMarket.category === market.category) {
-        // Check for direct conflicts (e.g., Over 2.5 and Under 2.5)
-        const isConflict =
-          existingMarket.name.includes('Over') && market.name.includes('Under') &&
-          existingMarket.line === market.line;
-        if (isConflict) {
-          throw new BadRequestException(
-            `Conflicting selection: you already have "${existingMarket.name}" from this event`,
-          );
-        }
+    for (const existing of sameMatch) {
+      const reason = conflictBetween(existing.market, market);
+      if (reason) {
+        throw new BadRequestException(
+          `Conflicting selection: you already have "${existing.market.name}" from this match — ${reason}`,
+        );
       }
     }
 
@@ -158,7 +162,8 @@ export class BuilderService {
    * Export selections as a formatted text summary.
    */
   async exportSelections(userId: string) {
-    const { selections, combinedProbability } = await this.getSelections(userId);
+    const { selections, combinedProbability, combinedRange, sharedMatches } =
+      await this.getSelections(userId);
 
     if (selections.length === 0) {
       throw new BadRequestException('No selections to export');
@@ -181,13 +186,23 @@ export class BuilderService {
     const header = `OraQL Bet Builder — ${selections.length} selection${
       selections.length === 1 ? '' : 's'
     }`;
+    const pct = (p: number) => `${(p * 100).toFixed(2)}%`;
     const footer = [
-      `${(combinedProbability * 100).toFixed(2)}% chance all ${selections.length} land,`,
-      'assuming they are independent of one another.',
+      combinedProbability != null
+        ? `${pct(combinedProbability)} chance all ${selections.length} land,` +
+          ' treating different matches as independent.'
+        : `Between ${pct(combinedRange.low)} and ${pct(combinedRange.high)} chance all ${selections.length} land.` +
+          ` ${sharedMatches === 1 ? 'One match holds' : `${sharedMatches} matches hold`} more than one selection,` +
+          ' and selections from the same match move together, so no single figure is given.',
       'Estimates from historical data — not a guarantee.',
     ].join(' ');
     const exportText = [header, '─'.repeat(40), ...lines, '─'.repeat(40), footer].join('\n');
 
-    return { text: exportText, selections: selections.length, combinedProbability };
+    return {
+      text: exportText,
+      selections: selections.length,
+      combinedProbability,
+      combinedRange,
+    };
   }
 }
