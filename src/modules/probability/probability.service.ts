@@ -4,6 +4,7 @@ import { MarketsService } from '@/modules/markets/markets.service';
 import { PicksService } from '@/modules/picks/picks.service';
 import { EventsGateway } from '@/modules/events/events.gateway';
 import { ExplanationService } from './explanation.service';
+import { goalMultipliers, shiftOverProbability } from './injury-impact';
 import { MarketCategory, Prisma, EventStatus } from '@prisma/client';
 
 /**
@@ -111,22 +112,23 @@ export class ProbabilityService {
       away: event.awayTeam.shortName || event.awayTeam.name,
     };
 
+    // Absences move what each side is expected to score. Every goal-based
+    // market below is built from these, so Over/Under pairs, the 1X2 and
+    // BTTS all move together and still add up. See injury-impact.ts.
+    const goalShift = goalMultipliers(homeInjuries, awayInjuries);
+    const homeForGoals = { ...homeStats, avgGoalsScored: homeStats.avgGoalsScored * goalShift.home };
+    const awayForGoals = { ...awayStats, avgGoalsScored: awayStats.avgGoalsScored * goalShift.away };
+
     // Match Result (1X2)
-    const matchResult = this.computeMatchResult(
-      homeStats,
-      awayStats,
-      homeInjuries,
-      awayInjuries,
-      teams,
-    );
+    const matchResult = this.computeMatchResult(homeStats, awayStats, goalShift, teams);
     markets.push(...matchResult);
 
     // Goals Markets
-    const goalsMarkets = this.computeGoalsMarkets(homeStats, awayStats);
+    const goalsMarkets = this.computeGoalsMarkets(homeForGoals, awayForGoals);
     markets.push(...goalsMarkets);
 
     // Team goal totals — "over 0.5" is only betable at team level
-    const teamGoalsMarkets = this.computeTeamGoalsMarkets(homeStats, awayStats, teams);
+    const teamGoalsMarkets = this.computeTeamGoalsMarkets(homeStats, awayStats, teams, goalShift);
     markets.push(...teamGoalsMarkets);
 
     // Corners Markets
@@ -138,23 +140,15 @@ export class ProbabilityService {
     markets.push(...cardsMarkets);
 
     // BTTS (Both Teams to Score)
-    const btts = this.computeBTTS(homeStats, awayStats);
+    const btts = this.computeBTTS(homeStats, awayStats, goalShift);
     markets.push(...btts);
 
-    // Apply injury adjustments
-    const adjusted = markets.map((m) => {
-      const injuryFactor = this.computeInjuryAdjustment(
-        m.category,
-        homeInjuries,
-        awayInjuries,
-        hasLineups,
-      );
-      return {
-        ...m,
-        probability: Math.max(0.01, Math.min(0.99, m.probability * injuryFactor)),
-        confidence: hasLineups ? Math.min(m.confidence + 0.1, 1.0) : m.confidence,
-      };
-    });
+    // Absences are already inside the numbers above. Confirmed lineups only
+    // raise confidence: we now know who is actually playing.
+    const adjusted = markets.map((m) => ({
+      ...m,
+      confidence: hasLineups ? Math.min(m.confidence + 0.1, 1.0) : m.confidence,
+    }));
 
     // Generate explanations
     const withExplanations = adjusted.map((m) => ({
@@ -168,27 +162,44 @@ export class ProbabilityService {
       }),
     }));
 
-    // Save to database
-    const saveOps = withExplanations.map((m) =>
-      this.prisma.market.create({
-        data: {
-          eventId,
-          category: m.category,
-          name: m.name,
-          shortName: m.shortName,
-          line: m.line,
-          probability: m.probability,
-          confidence: m.confidence,
-          explanation: m.explanation,
-          explanationFactors: m.explanationFactors,
-          probabilityUpdatedAt: new Date(),
-        },
-      }),
-    );
+    // Save to database — in place. Deleting and recreating every market gave
+    // each a new id, and the cascade silently emptied users' Bet Builders of
+    // this match every time it was recomputed (as it now is on lineups). A
+    // market is identified within its event by its name.
+    const existing = await this.prisma.market.findMany({
+      where: { eventId },
+      select: { id: true, name: true },
+    });
+    const idByName = new Map<string, string>(existing.map((e) => [String(e.name), String(e.id)]));
+    const keep = new Set<string>();
+    const now = new Date();
 
-    // Clear old markets first, then write new ones
-    await this.prisma.market.deleteMany({ where: { eventId } });
-    await this.prisma.$transaction(saveOps);
+    const saveOps = withExplanations.map((m) => {
+      const data = {
+        category: m.category,
+        name: m.name,
+        shortName: m.shortName,
+        line: m.line,
+        probability: m.probability,
+        confidence: m.confidence,
+        explanation: m.explanation,
+        explanationFactors: m.explanationFactors,
+        probabilityUpdatedAt: now,
+      };
+      const id = idByName.get(m.name);
+      if (id) {
+        keep.add(id);
+        return this.prisma.market.update({ where: { id }, data });
+      }
+      return this.prisma.market.create({ data: { eventId, ...data } });
+    });
+
+    // Markets the model no longer produces are removed.
+    const stale = existing.filter((e) => !keep.has(e.id)).map((e) => e.id);
+    await this.prisma.$transaction([
+      ...(stale.length ? [this.prisma.market.deleteMany({ where: { id: { in: stale } } })] : []),
+      ...saveOps,
+    ]);
 
     // Update value bet flags
     await this.marketsService.updateValueBetFlags(eventId);
@@ -209,8 +220,7 @@ export class ProbabilityService {
   private computeMatchResult(
     homeStats: TeamHistoryStats,
     awayStats: TeamHistoryStats,
-    homeInjuries: InjuryInfo[],
-    awayInjuries: InjuryInfo[],
+    goalShift: { home: number; away: number },
     teams: { home: string; away: string },
   ) {
     const homeWinRate = homeStats.winRate;
@@ -220,6 +230,13 @@ export class ProbabilityService {
     let homeProb = (homeWinRate + homeAdvantage) * 0.6 + 0.2;
     let awayProb = awayWinRate * 0.6 + 0.1;
     let drawProb = 1 - homeProb - awayProb;
+
+    // A side expected to score relatively more (its opponent's defence
+    // depleted, or its own attack intact while the other's is not) gains
+    // at the other's expense. Renormalised below, so 1 + X + 2 stays 100%.
+    const edge = goalShift.home / goalShift.away;
+    homeProb *= edge;
+    awayProb /= edge;
 
     // Normalize
     const total = homeProb + awayProb + drawProb;
@@ -319,12 +336,13 @@ export class ProbabilityService {
     homeStats: TeamHistoryStats,
     awayStats: TeamHistoryStats,
     teams: { home: string; away: string },
+    goalShift: { home: number; away: number } = { home: 1, away: 1 },
   ) {
     const markets: any[] = [];
 
-    const sides: Array<{ name: string; stats: TeamHistoryStats; tag: string }> = [
-      { name: teams.home, stats: homeStats, tag: 'H' },
-      { name: teams.away, stats: awayStats, tag: 'A' },
+    const sides: Array<{ name: string; stats: TeamHistoryStats; tag: string; shift: number }> = [
+      { name: teams.home, stats: homeStats, tag: 'H', shift: goalShift.home },
+      { name: teams.away, stats: awayStats, tag: 'A', shift: goalShift.away },
     ];
 
     for (const side of sides) {
@@ -342,7 +360,10 @@ export class ProbabilityService {
         // Laplace smoothing keeps a short record from producing a 0% or 100%
         // that the sample cannot support.
         const rate = (scoredIn + 1) / (stats.matchCount + 2);
-        const probability = Math.max(0.01, Math.min(0.99, rate));
+        const probability = Math.max(
+          0.01,
+          Math.min(0.99, shiftOverProbability(rate, line, side.shift)),
+        );
 
         markets.push({
           category: MarketCategory.GOALS,
@@ -459,14 +480,22 @@ export class ProbabilityService {
     return markets;
   }
 
-  private computeBTTS(homeStats: TeamHistoryStats, awayStats: TeamHistoryStats) {
+  private computeBTTS(
+    homeStats: TeamHistoryStats,
+    awayStats: TeamHistoryStats,
+    goalShift: { home: number; away: number } = { home: 1, away: 1 },
+  ) {
     // BTTS probability: both teams score in the match
-    const homeScoringRate = homeStats.matchCount > 0
-      ? homeStats.matchesScored / homeStats.matchCount
-      : 0.5;
-    const awayScoringRate = awayStats.matchCount > 0
-      ? awayStats.matchesScored / awayStats.matchCount
-      : 0.5;
+    const homeScoringRate = shiftOverProbability(
+      homeStats.matchCount > 0 ? homeStats.matchesScored / homeStats.matchCount : 0.5,
+      0.5,
+      goalShift.home,
+    );
+    const awayScoringRate = shiftOverProbability(
+      awayStats.matchCount > 0 ? awayStats.matchesScored / awayStats.matchCount : 0.5,
+      0.5,
+      goalShift.away,
+    );
 
     const bttsProb = homeScoringRate * awayScoringRate;
     const confidence = Math.min(homeStats.matchCount, awayStats.matchCount) >= 5 ? 0.6 : 0.35;
@@ -515,26 +544,6 @@ export class ProbabilityService {
     let result = 1;
     for (let i = 2; i <= n; i++) result *= i;
     return result;
-  }
-
-  /**
-   * Compute injury-based probability adjustment factor.
-   */
-  private computeInjuryAdjustment(
-    category: MarketCategory,
-    homeInjuries: InjuryInfo[],
-    awayInjuries: InjuryInfo[],
-    hasLineups: boolean,
-  ): number {
-    const totalKeyInjuries = [...homeInjuries, ...awayInjuries].filter(
-      (i) => i.status === 'Out',
-    ).length;
-
-    // Minimal adjustment — key players out slightly decrease predictability
-    if (totalKeyInjuries === 0) return 1.0;
-    if (totalKeyInjuries <= 2) return 0.97;
-    if (totalKeyInjuries <= 4) return 0.94;
-    return 0.90;
   }
 
   /**

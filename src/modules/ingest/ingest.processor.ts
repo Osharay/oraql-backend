@@ -6,6 +6,7 @@ import { IngestService } from './ingest.service';
 import { ApiFootballQuotaExhausted } from './adapters/api-football.adapter';
 import { ProbabilityService } from '@/modules/probability/probability.service';
 import { ApiFootballAdapter } from './adapters/api-football.adapter';
+import { LineupsService } from './lineups.service';
 
 /**
  * One sweep per hour, whoever asks. The daily chain and the admin button
@@ -25,6 +26,7 @@ export class IngestProcessor {
   constructor(
     private readonly ingestService: IngestService,
     private readonly probabilityService: ProbabilityService,
+    private readonly lineups: LineupsService,
     @InjectQueue('ingest') private readonly ingestQueue: Queue,
   ) {}
 
@@ -299,8 +301,15 @@ export class IngestProcessor {
 
   @Process('lineup-check')
   async handleLineupCheck(job: Job<{ eventId: string; externalId: string }>) {
-    this.logger.log(`Checking lineup for event ${job.data.eventId}...`);
-    // Lineup check logic delegated to IngestService
-    // On confirmation, triggers probability recomputation
+    const result = await this.lineups.check(job.data.eventId);
+
+    // Recompute once, on the poll that confirms: the model now knows who is
+    // missing, and confidence rises because the lineups are known. Markets
+    // are updated in place, so builder selections on them survive.
+    if (result.confirmed && !result.skipped) {
+      await this.probabilityService.computeForEvent(job.data.eventId);
+    }
+
+    return result;
   }
 }

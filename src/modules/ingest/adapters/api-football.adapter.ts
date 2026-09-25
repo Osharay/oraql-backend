@@ -515,14 +515,39 @@ export class ApiFootballAdapter implements IDataProvider {
       isConfirmed: true,
       starters: (l.startXI || []).map((p: any) => ({
         playerExternalId: String(p.player.id),
+        name: p.player.name,
+        number: p.player.number ?? undefined,
         position: p.player.pos,
         gridPosition: p.player.grid,
       })),
       substitutes: (l.substitutes || []).map((p: any) => ({
         playerExternalId: String(p.player.id),
+        name: p.player.name,
+        number: p.player.number ?? undefined,
         position: p.player.pos,
       })),
     }));
+  }
+
+  /**
+   * Who is missing THIS fixture, for both sides, in one request.
+   *
+   * The per-team endpoint returns every absence across the whole season, so
+   * it cannot say who is out today. The per-fixture one can.
+   */
+  async getFixtureInjuries(fixtureExternalId: string): Promise<InjuryData[]> {
+    const raw = await this.request<any[]>('injuries', { fixture: fixtureExternalId });
+
+    return raw
+      .filter((i) => i?.player?.id != null && i?.team?.id != null)
+      .map((i) => ({
+        playerExternalId: String(i.player.id),
+        playerName: i.player.name,
+        teamExternalId: String(i.team.id),
+        type: i.player.type || 'Unknown',
+        reason: i.player.reason,
+        status: this.mapInjuryStatus(i.player.type),
+      }));
   }
 
   async getInjuries(teamExternalId: string): Promise<InjuryData[]> {

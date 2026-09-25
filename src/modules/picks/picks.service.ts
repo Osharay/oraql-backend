@@ -104,11 +104,10 @@ export class PicksService {
    * Called by the Probability Engine after computing market probabilities.
    */
   async generateForEvent(eventId: string) {
-    // Deactivate existing picks
-    await this.prisma.pick.updateMany({
-      where: { eventId },
-      data: { isActive: false },
-    });
+    // Replace the event's picks. They cannot merely be deactivated: rank is
+    // unique per event, so a second set would collide with the first. (This
+    // was hidden while recomputes deleted every market, and picks with them.)
+    await this.prisma.pick.deleteMany({ where: { eventId } });
 
     // Get top markets by probability
     const topMarkets = await this.prisma.market.findMany({

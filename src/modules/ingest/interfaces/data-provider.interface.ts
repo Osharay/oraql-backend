@@ -88,17 +88,23 @@ export interface LineupData {
   isConfirmed: boolean;
   starters: Array<{
     playerExternalId: string;
+    name?: string;
+    number?: number;
     position?: string;
     gridPosition?: string;
   }>;
   substitutes: Array<{
     playerExternalId: string;
+    name?: string;
+    number?: number;
     position?: string;
   }>;
 }
 
 export interface InjuryData {
   playerExternalId: string;
+  /** Present from the per-fixture endpoint, so an unseen player can be created. */
+  playerName?: string;
   teamExternalId: string;
   type: string;
   reason?: string;
