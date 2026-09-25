@@ -131,6 +131,13 @@ export class IngestService {
       }, {
         attempts: 3,
         backoff: { type: 'exponential', delay: 15000 },
+        // One check per match in the queue at a time. Bull ignores an add
+        // whose jobId already exists, so a check that has not run yet is not
+        // queued again 10 minutes later; removing it once finished (or failed
+        // for good) frees the id for the next poll.
+        jobId: `lineup-check:${event.id}`,
+        removeOnComplete: true,
+        removeOnFail: true,
       });
     }
 

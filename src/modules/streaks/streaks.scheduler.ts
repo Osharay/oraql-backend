@@ -19,6 +19,14 @@ import { ProfilesService } from './profiles.service';
 export class StreaksScheduler {
   private readonly logger = new Logger(StreaksScheduler.name);
 
+  /**
+   * Set while the daily cycle runs. The half-hourly settlement and the hourly
+   * capture both also fire at 05:30/06:00, when the cycle is doing the same
+   * work over the same matches; running side by side they only compete for
+   * the database. The cycle derives and captures anyway, so they stand down.
+   */
+  private cycleRunning = false;
+
   constructor(
     private readonly observations: ObservationsService,
     private readonly baselines: BaselinesService,
@@ -44,6 +52,11 @@ export class StreaksScheduler {
    */
   @Cron('30 5 * * *', { name: 'streak-engine-cycle', timeZone: 'UTC' })
   async dailyCycle() {
+    if (this.cycleRunning) {
+      this.logger.warn('Streak engine cycle still running from before — skipping this one');
+      return;
+    }
+    this.cycleRunning = true;
     this.logger.log('Streak engine cycle starting');
 
     try {
@@ -66,6 +79,8 @@ export class StreaksScheduler {
       this.logger.error(
         `Streak engine cycle failed: ${error instanceof Error ? error.message : error}`,
       );
+    } finally {
+      this.cycleRunning = false;
     }
   }
 
@@ -75,6 +90,10 @@ export class StreaksScheduler {
    */
   @Cron('0 * * * *', { name: 'streak-snapshot-capture', timeZone: 'UTC' })
   async capture() {
+    if (this.cycleRunning) {
+      this.logger.debug('Snapshot capture skipped — the daily cycle is capturing');
+      return;
+    }
     try {
       await this.snapshots.captureForUpcoming();
     } catch (error) {
@@ -90,6 +109,10 @@ export class StreaksScheduler {
    */
   @Cron('*/30 * * * *', { name: 'streak-settlement', timeZone: 'UTC' })
   async settle() {
+    if (this.cycleRunning) {
+      this.logger.debug('Settlement skipped — the daily cycle is deriving the same matches');
+      return;
+    }
     try {
       await this.observations.deriveForFinishedEvents(200);
       await this.snapshots.settleFinished();
