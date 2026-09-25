@@ -1,18 +1,12 @@
-import { IsOptional, IsString, IsUUID } from 'class-validator';
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsString } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
 
 export class RefreshTokenDto {
   @ApiProperty()
   @IsString()
   refreshToken: string;
 
-  /**
-   * Optional. The refresh token already carries the user in its `sub` claim,
-   * so the server reads it from there; a client that cannot supply a userId
-   * (it is not part of the login response) can refresh without one.
-   */
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsUUID()
-  userId?: string;
+  // No userId. It used to be accepted as a fallback when the token did not
+  // verify, which let anyone name the account they wanted a session for. The
+  // user comes from the verified token and nowhere else.
 }

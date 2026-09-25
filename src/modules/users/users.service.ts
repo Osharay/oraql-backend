@@ -1,8 +1,8 @@
 import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
 import { AuthProvider, Sport, Prisma } from '@prisma/client';
-import * as bcrypt from 'bcrypt';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { hashToken } from '@/modules/auth/token-hash';
 
 @Injectable()
 export class UsersService {
@@ -115,9 +115,8 @@ export class UsersService {
   }
 
   async updateRefreshToken(id: string, refreshToken: string | null) {
-    const hashed = refreshToken
-      ? await bcrypt.hash(refreshToken, 10)
-      : null;
+    // SHA-256, not bcrypt: see auth/token-hash.ts.
+    const hashed = refreshToken ? hashToken(refreshToken) : null;
 
     return this.prisma.user.update({
       where: { id },

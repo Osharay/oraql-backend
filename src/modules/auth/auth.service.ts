@@ -7,6 +7,8 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
+import { randomUUID } from 'crypto';
+import { tokenMatches } from './token-hash';
 import { UsersService } from '@/modules/users/users.service';
 import { RegisterDto } from './dto/register.dto';
 import { AuthProvider } from '@prisma/client';
@@ -15,6 +17,8 @@ export interface JwtPayload {
   sub: string;
   email: string;
   role: string;
+  /** Which kind of token this is. Only 'access' is accepted by the API. */
+  typ: 'access' | 'refresh';
 }
 
 export interface TokenPair {
@@ -117,29 +121,29 @@ export class AuthService {
   /**
    * Refresh the access token using a valid refresh token.
    */
-  async refreshTokens(refreshToken: string, fallbackUserId?: string): Promise<TokenPair> {
-    // The refresh token names its own subject, so the caller does not have to.
-    // Requiring a userId from the client meant the frontend could not refresh
-    // at all — the login response does not include one — which is why sessions
-    // were ending at the access token's 15 minutes.
-    let userId: string;
+  async refreshTokens(refreshToken: string): Promise<TokenPair> {
+    // The user comes from the verified token and nowhere else. There is no
+    // fallback: an unverifiable token is simply refused.
+    let payload: JwtPayload;
     try {
-      const payload = await this.jwtService.verifyAsync<JwtPayload>(refreshToken);
-      userId = payload.sub;
+      payload = await this.jwtService.verifyAsync<JwtPayload>(refreshToken, {
+        secret: this.config.get<string>('jwt.refreshSecret'),
+      });
     } catch {
-      if (!fallbackUserId) {
-        throw new UnauthorizedException('Invalid refresh token');
-      }
-      userId = fallbackUserId;
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+    if (payload.typ !== 'refresh') {
+      throw new UnauthorizedException('Invalid refresh token');
     }
 
-    const user = await this.usersService.findById(userId);
+    const user = await this.usersService.findById(payload.sub);
     if (!user || !user.refreshToken) {
       throw new UnauthorizedException('Access denied');
     }
 
-    const isValid = await bcrypt.compare(refreshToken, user.refreshToken);
-    if (!isValid) {
+    // Must be the one most recently issued: each refresh rotates it, so a
+    // token that was already used (or stolen and used) no longer matches.
+    if (!tokenMatches(refreshToken, user.refreshToken)) {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
@@ -163,14 +167,18 @@ export class AuthService {
     email: string,
     role: string,
   ): Promise<TokenPair> {
-    const payload: JwtPayload = { sub: userId, email, role };
+    const claims = { sub: userId, email, role };
 
     const [accessToken, refreshToken] = await Promise.all([
-      this.jwtService.signAsync(payload, {
+      this.jwtService.signAsync({ ...claims, typ: 'access' } satisfies JwtPayload, {
         expiresIn: this.config.get<string>('jwt.accessExpiration', '15m'),
       }),
-      this.jwtService.signAsync(payload, {
+      // Own key, own type, and a unique id so two refreshes in the same second
+      // never produce the same token.
+      this.jwtService.signAsync({ ...claims, typ: 'refresh' } satisfies JwtPayload, {
+        secret: this.config.get<string>('jwt.refreshSecret'),
         expiresIn: this.config.get<string>('jwt.refreshExpiration', '30d'),
+        jwtid: randomUUID(),
       }),
     ]);
 

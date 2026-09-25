@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { registerAs } from '@nestjs/config';
 
 export const appConfig = registerAs('app', () => ({
@@ -97,11 +98,23 @@ export const deriveSeasons = (): number => {
 export const oddsPollingEnabled = (): boolean =>
   (process.env.ODDS_POLLING_ENABLED ?? '').trim().toLowerCase() === 'true';
 
-export const jwtConfig = registerAs('jwt', () => ({
-  secret: process.env.JWT_SECRET || 'dev-secret-change-me',
-  accessExpiration: process.env.JWT_ACCESS_EXPIRATION || '15m',
-  refreshExpiration: process.env.JWT_REFRESH_EXPIRATION || '30d',
-}));
+export const jwtConfig = registerAs('jwt', () => {
+  const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
+  return {
+    secret,
+    /**
+     * Refresh tokens are signed with their own key, so one can never pass as
+     * an access token (or the reverse) even if the type check were bypassed.
+     * Set JWT_REFRESH_SECRET; without it a key is derived from JWT_SECRET,
+     * which still differs from it, so existing deployments keep working.
+     */
+    refreshSecret:
+      process.env.JWT_REFRESH_SECRET ||
+      createHash('sha256').update(`${secret}:refresh-token`).digest('hex'),
+    accessExpiration: process.env.JWT_ACCESS_EXPIRATION || '15m',
+    refreshExpiration: process.env.JWT_REFRESH_EXPIRATION || '30d',
+  };
+});
 
 export const googleConfig = registerAs('google', () => ({
   clientId: process.env.GOOGLE_CLIENT_ID,

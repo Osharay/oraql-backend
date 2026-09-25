@@ -81,7 +81,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Refresh access token' })
   async refreshTokens(@Body() dto: RefreshTokenDto) {
-    return this.authService.refreshTokens(dto.refreshToken, dto.userId);
+    return this.authService.refreshTokens(dto.refreshToken);
   }
 
   @Post('logout')
