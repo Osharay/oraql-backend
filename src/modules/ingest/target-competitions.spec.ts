@@ -65,4 +65,16 @@ describe('matchesSeed', () => {
   it('refuses a different competition in the right country', () => {
     expect(matchesSeed(seed({}), { name: 'Championship', country: 'England' })).toBe(false);
   });
+
+  it('covers the Egyptian second tier under the names the provider may use', () => {
+    const seed = TARGET_COMPETITIONS.find((c) => c.country === 'Egypt' && c.name === 'Second League')!;
+    expect(seed).toBeDefined();
+    for (const name of ['Second League', 'Division 2', 'Second Division A']) {
+      expect(matchesSeed(seed, { name, country: 'Egypt' })).toBe(true);
+    }
+    // Never another country's second tier.
+    expect(matchesSeed(seed, { name: 'Second League', country: 'Bulgaria' })).toBe(false);
+    // And the top flight still resolves to its own seed, not this one.
+    expect(matchesSeed(seed, { name: 'Premier League', country: 'Egypt' })).toBe(false);
+  });
 });

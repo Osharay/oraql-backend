@@ -93,6 +93,19 @@ export const TARGET_COMPETITIONS: TargetSeed[] = [
   T2('Liga I', 'Romania', ['SuperLiga']),
   T2('Premier League', 'Ukraine', ['Ukrainian Premier League']),
   T2('Premier League', 'Egypt', ['Egyptian Premier League']),
+  // Second tier, added for the first-half-draw markets Nigerian punters build
+  // accumulators from: low-scoring, heavily priced, and a dozen legs of one
+  // real slip came from it. The provider's exact name is unconfirmed, so the
+  // likely spellings are all listed; an unmatched seed is stored inactive with
+  // a note rather than guessed, and shows up in the admin list.
+  T2('Second League', 'Egypt', [
+    'Second Division',
+    'Second Division A',
+    'Division 2',
+    'Division 2 A',
+    'Egyptian Second Division',
+    'Egyptian Second Division A',
+  ]),
   T2('Botola Pro', 'Morocco'),
   T2('Premier Soccer League', 'South-Africa', ['Betway Premiership', 'PSL']),
   T2('NPFL', 'Nigeria', ['Nigeria Professional Football League', 'Premier League']),
