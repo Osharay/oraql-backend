@@ -125,7 +125,9 @@ export class StreaksController {
   @ApiOperation({ summary: 'Test every slice, correct for multiple comparisons, store candidates' })
   @HttpCode(202)
   runEngine() {
-    return accepted(this.jobs.start('engine', () => this.candidates.runEngine()));
+    return accepted(
+      this.jobs.start('engine', (report) => this.candidates.runEngine({ onProgress: report })),
+    );
   }
 
   @Get('board/event/:eventId')

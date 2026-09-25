@@ -111,6 +111,8 @@ export class CandidatesService {
     splitByVenue?: boolean;
     /** Test every team rather than only those with a fixture coming up. */
     allTeams?: boolean;
+    /** Called as teams are tested, so a long run can show how far it has got. */
+    onProgress?: (progress: Record<string, unknown>) => void;
   }): Promise<{
     engineRunId: string;
     tested: number;
@@ -165,8 +167,22 @@ export class CandidatesService {
 
       const tested: TestedCandidate[] = [];
       let eventsSeen = 0;
+      const startedAt = Date.now();
+      const report = (done: number) => {
+        const elapsed = (Date.now() - startedAt) / 1000;
+        const perTeam = done > 0 ? elapsed / done : 0;
+        options?.onProgress?.({
+          teams: `${done} of ${teams.length}`,
+          tested: tested.length,
+          ...(done > 0 && done < teams.length
+            ? { 'about minutes left': Math.ceil(((teams.length - done) * perTeam) / 60) }
+            : {}),
+        });
+      };
+      report(0);
 
-      for (const team of teams) {
+      for (const [index, team] of teams.entries()) {
+        if (index > 0 && index % 10 === 0) report(index);
         const rowsByKey = await this.loadTeamSlices(team.id);
         eventsSeen += rowsByKey.size;
 
@@ -212,6 +228,8 @@ export class CandidatesService {
           }
         }
       }
+
+      report(teams.length);
 
       // Correct across every test performed in this run — not just the
       // promising ones. Using the survivors as the denominator would defeat it.
@@ -291,20 +309,36 @@ export class CandidatesService {
   }
 
   /**
-   * Teams with a fixture inside the snapshot window.
+   * Teams with a fixture inside the snapshot window, in the competitions we
+   * cover.
    *
    * Testing a team with no upcoming fixture produces a candidate that can
    * never be snapshotted, while still counting towards the correction and so
    * raising the bar for every candidate that can. Narrowing here buys real
    * statistical power, not just speed.
+   *
+   * The same goes for teams outside the target competitions: their matches
+   * are not derived into observations, so they cannot reach the sample floor,
+   * yet each one still cost a heavy query — thousands of them a week, which
+   * is most of why a run took hours. Until the target list is seeded, every
+   * team with a fixture is tested as before.
    */
   private async teamsWithUpcomingFixtures(withinDays = 7) {
+    const targets = await this.prisma.targetCompetition.findMany({
+      where: { isActive: true, externalId: { not: null } },
+      select: { externalId: true },
+    });
+    const targetIds = targets
+      .map((t) => String(t.externalId))
+      .filter((id: string) => !id.startsWith('unresolved:'));
+
     const events = await this.prisma.event.findMany({
       where: {
         kickoffAt: {
           gte: new Date(),
           lte: new Date(Date.now() + withinDays * 24 * 3600_000),
         },
+        ...(targetIds.length ? { league: { externalId: { in: targetIds } } } : {}),
       },
       select: { homeTeamId: true, awayTeamId: true },
     });
@@ -322,47 +356,74 @@ export class CandidatesService {
    * Observations for a team, keyed by market and selection.
    *
    * MATCH-selection rows carry no teamId — they belong to the fixture, not a
-   * side — so they are reached through the event and attributed to whichever
-   * team we are slicing for.
+   * side — so they are reached through the team's matches and attributed to
+   * whichever team we are slicing for.
+   *
+   * Two index-friendly reads instead of one OR across both kinds: the OR
+   * could not use the team index for one branch or the event index for the
+   * other, so each team cost a scan of the whole observations table.
    */
   private async loadTeamSlices(teamId: string): Promise<Map<string, SliceRow[]>> {
     // Keyed by market alone: a team's home and away records for the same
     // market are one body of evidence until there is enough to split them.
     const since = new Date(Date.now() - this.LOOKBACK_DAYS * 24 * 3600_000);
 
-    const observations = await this.prisma.marketObservation.findMany({
+    const matches = await this.prisma.event.findMany({
       where: {
-        result: { in: [ObservationResult.WIN, ObservationResult.LOSS] },
         kickoffAt: { gte: since },
-        OR: [
-          { teamId },
-          {
-            selection: ObservationSelection.MATCH,
-            event: { OR: [{ homeTeamId: teamId }, { awayTeamId: teamId }] },
-          },
-        ],
+        OR: [{ homeTeamId: teamId }, { awayTeamId: teamId }],
       },
-      select: {
-        marketDefinitionId: true,
-        selection: true,
-        result: true,
-        isHome: true,
-        leagueId: true,
-        season: true,
-        dataQuality: true,
-        event: { select: { homeTeamId: true } },
-      },
-      orderBy: { kickoffAt: 'desc' },
-      take: this.MAX_OBSERVATION_ROWS,
+      select: { id: true, homeTeamId: true },
     });
+    if (matches.length === 0) return new Map();
+    const homeTeamByEvent = new Map<string, string>(
+      matches.map((m) => [String(m.id), String(m.homeTeamId)]),
+    );
+
+    const select = {
+      eventId: true,
+      marketDefinitionId: true,
+      selection: true,
+      result: true,
+      isHome: true,
+      leagueId: true,
+      season: true,
+      dataQuality: true,
+      kickoffAt: true,
+    } as const;
+    const settled = { in: [ObservationResult.WIN, ObservationResult.LOSS] };
+
+    const [own, fixture] = await Promise.all([
+      this.prisma.marketObservation.findMany({
+        where: { teamId, result: settled, kickoffAt: { gte: since } },
+        select,
+        orderBy: { kickoffAt: 'desc' },
+        take: this.MAX_OBSERVATION_ROWS,
+      }),
+      this.prisma.marketObservation.findMany({
+        where: {
+          eventId: { in: [...homeTeamByEvent.keys()] },
+          selection: ObservationSelection.MATCH,
+          result: settled,
+        },
+        select,
+        orderBy: { kickoffAt: 'desc' },
+        take: this.MAX_OBSERVATION_ROWS,
+      }),
+    ]);
+
+    // Newest first across both, then the same safety cap as before.
+    const observations = [...own, ...fixture]
+      .sort((a, b) => new Date(b.kickoffAt).getTime() - new Date(a.kickoffAt).getTime())
+      .slice(0, this.MAX_OBSERVATION_ROWS);
 
     const byKey = new Map<string, SliceRow[]>();
 
     for (const o of observations) {
-      const key = o.marketDefinitionId;
+      const key = String(o.marketDefinitionId);
       const isHome =
         o.selection === ObservationSelection.MATCH
-          ? o.event.homeTeamId === teamId
+          ? homeTeamByEvent.get(String(o.eventId)) === teamId
           : o.isHome;
 
       const list = byKey.get(key) ?? [];
