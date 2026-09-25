@@ -9,6 +9,7 @@ import {
 } from '@prisma/client';
 import { MARKET_DEFINITIONS, MatchOutcome, Selection } from './market-definitions';
 import { nextRevision } from './observation-revision';
+import { deriveSignature, registryHash } from './derive-signature';
 import { deriveSeasons } from '@/config/app.config';
 
 /**
@@ -203,6 +204,35 @@ export class ObservationsService {
     return rows;
   }
 
+  /** Fingerprint of the markets derivation will actually write: active AND known to the code. */
+  private registryHashOf(definitions: Array<{ marketId: string }>): string {
+    const active = new Set(definitions.map((d) => String(d.marketId)));
+    return registryHash(
+      MARKET_DEFINITIONS.filter((d) => active.has(d.marketId)).map((d) => d.marketId),
+    );
+  }
+
+  /**
+   * Record what each event was derived from, so the refresh pass can tell
+   * whether it needs doing again without counting its observations. Grouped by
+   * signature: a batch has a handful of distinct ones, so this is a few
+   * UPDATEs, not one per event.
+   */
+  private async stampSignatures(signatureByEvent: Map<string, string>): Promise<void> {
+    const bySignature = new Map<string, string[]>();
+    for (const [eventId, signature] of signatureByEvent) {
+      const ids = bySignature.get(signature) ?? [];
+      ids.push(eventId);
+      bySignature.set(signature, ids);
+    }
+    for (const [signature, ids] of bySignature) {
+      await this.prisma.event.updateMany({
+        where: { id: { in: ids } },
+        data: { derivedSignature: signature },
+      });
+    }
+  }
+
   /**
    * Derive a whole batch of matches in a handful of queries.
    *
@@ -239,6 +269,8 @@ export class ObservationsService {
     const defIdByMarketId = new Map<string, string>(
       definitions.map((d) => [String(d.marketId), String(d.id)]),
     );
+    const hash = this.registryHashOf(definitions);
+    const signatures = new Map<string, string>();
 
     // eventId -> "definition:selection" -> latest recorded result
     const latestByEvent = new Map<string, Map<string, { result: string; revision: number }>>();
@@ -259,11 +291,25 @@ export class ObservationsService {
 
       const homeGoals = event.ftHomeScore ?? event.homeScore;
       const awayGoals = event.ftAwayScore ?? event.awayScore;
-      if (homeGoals == null || awayGoals == null) continue;
 
       const homeStats = event.matchStats.find((st: any) => st.teamId === event.homeTeamId);
       const awayStats = event.matchStats.find((st: any) => st.teamId === event.awayTeamId);
       const hasStats = Boolean(homeStats && awayStats);
+      const hasScore = homeGoals != null && awayGoals != null;
+
+      // Stamped even when there is no score to settle, so the refresh pass
+      // leaves a scoreless match alone until its score arrives.
+      signatures.set(
+        String(event.id),
+        deriveSignature({
+          registryHash: hash,
+          hasStats,
+          hasHalfTime: event.htHomeScore != null && event.htAwayScore != null,
+          hasScore,
+        }),
+      );
+
+      if (homeGoals == null || awayGoals == null) continue;
 
       const outcome: MatchOutcome = {
         homeGoals,
@@ -318,6 +364,10 @@ export class ObservationsService {
       });
       written += result.count;
     }
+
+    // Only after the rows are in: a crash before this leaves the event
+    // unstamped, and it is simply derived again (idempotently) next pass.
+    await this.stampSignatures(signatures);
 
     return written;
   }
@@ -597,12 +647,17 @@ export class ObservationsService {
   }
 
   /**
-   * Finished events whose observations are not complete.
+   * Finished events whose derivation is out of date.
    *
-   * A fully derived event has one row per active market and side (UNKNOWN
-   * included), so fewer distinct pairs means a market is missing. An event
-   * with a half-time score and an UNKNOWN on a half-time market, with no later
-   * revision, can now be settled.
+   * An event is up to date when its stamp matches what it would be derived
+   * from now: the same live markets, and the same inputs present. A market
+   * added to the registry, statistics arriving for both sides, a half-time
+   * score (which settles half-time UNKNOWNs) or a final score all change the
+   * expected stamp, so the event comes back exactly when there is new work.
+   *
+   * This replaced counting each event's distinct observation pairs, which ran
+   * a subquery over market_observations for every match on every batch.
+   * Events never stamped (derived before stamps existed) come back once.
    */
   private async findIncompleteEvents(limit: number, exclude: string[]): Promise<string[]> {
     if (limit <= 0) return [];
@@ -616,23 +671,10 @@ export class ObservationsService {
       .map((t) => String(t.externalId))
       .filter((id: string) => !id.startsWith('unresolved:'));
 
-    const definitions = await this.prisma.marketDefinition.findMany({
-      where: { isActive: true },
-      select: { marketId: true },
-    });
-    const active = new Set(definitions.map((d) => d.marketId));
-    const live = MARKET_DEFINITIONS.filter((d) => active.has(d.marketId));
+    const definitions = await this.activeDefinitions();
+    const hash = this.registryHashOf(definitions);
 
-    const expected = live.reduce((n, d) => n + d.selections.length, 0);
-    // What a match with no per-match statistics can produce: corner and card
-    // markets are not written for it, so expecting them would make every such
-    // match look incomplete for ever and drag it through every refresh pass.
-    const expectedWithoutStats = live
-      .filter((d) => !d.requires.some((r) => r === 'corners' || r === 'cards'))
-      .reduce((n, d) => n + d.selections.length, 0);
-
-    if (expected === 0) return [];
-
+    // Must build the same string as deriveSignature().
     const rows = await this.prisma.$queryRaw<Array<{ id: string }>>`
       SELECT e.id
       FROM events e
@@ -643,36 +685,18 @@ export class ObservationsService {
           ${targetIds.length} = 0
           OR l."externalId" = ANY(${targetIds}::text[])
         )
-        AND (
-          (SELECT COUNT(*) FROM (
-             SELECT DISTINCT o."marketDefinitionId", o.selection
-             FROM market_observations o
-             WHERE o."eventId" = e.id
-           ) pairs) < (
-             CASE
-               WHEN EXISTS (SELECT 1 FROM match_stats ms WHERE ms."eventId" = e.id)
-               THEN ${expected}
-               ELSE ${expectedWithoutStats}
-             END
-           )
-          OR (
-            e."htHomeScore" IS NOT NULL
-            AND EXISTS (
-              SELECT 1
-              FROM market_observations o
-              JOIN market_definitions d ON d.id = o."marketDefinitionId"
-              WHERE o."eventId" = e.id
-                AND o.result = 'UNKNOWN'
-                AND 'halftime' = ANY(d.requires)
-                AND NOT EXISTS (
-                  SELECT 1 FROM market_observations o2
-                  WHERE o2."eventId" = o."eventId"
-                    AND o2."marketDefinitionId" = o."marketDefinitionId"
-                    AND o2.selection = o.selection
-                    AND o2.revision > o.revision
-                )
-            )
-          )
+        AND e."derivedSignature" IS DISTINCT FROM (
+          ${hash}
+          || ':' || CASE WHEN (
+               SELECT COUNT(*) FROM match_stats ms
+               WHERE ms."eventId" = e.id
+                 AND ms."teamId" IN (e."homeTeamId", e."awayTeamId")
+             ) = 2 THEN '1' ELSE '0' END
+          || ':' || CASE WHEN e."htHomeScore" IS NOT NULL AND e."htAwayScore" IS NOT NULL
+                    THEN '1' ELSE '0' END
+          || ':' || CASE WHEN COALESCE(e."ftHomeScore", e."homeScore") IS NOT NULL
+                          AND COALESCE(e."ftAwayScore", e."awayScore") IS NOT NULL
+                    THEN '1' ELSE '0' END
         )
       ORDER BY e."kickoffAt" DESC
       LIMIT ${limit + exclude.length}

@@ -238,6 +238,11 @@ model Event {
   // Timestamps
   lineupsConfirmedAt DateTime?
   lastDataSync       DateTime?
+
+  /// What this event's observations were derived from — registry hash plus
+  /// which inputs (stats, half-time, score) were present. Re-derived only when
+  /// it no longer matches. See streaks/derive-signature.ts.
+  derivedSignature   String?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
@@ -606,7 +611,6 @@ model MarketObservation {
   @@index([marketDefinitionId, leagueId, season])
   @@index([teamId, marketDefinitionId, kickoffAt(sort: Desc)])
   @@index([kickoffAt])
-  @@index([result])
   @@map("market_observations")
 }
 
