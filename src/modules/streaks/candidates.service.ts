@@ -15,10 +15,12 @@ import {
 import { marketScope } from './market-definitions';
 import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
 import { currentSeasonRecord, SeasonRecord } from './season-record';
+import { detectLeagueChange, LeagueChange } from './league-change';
 
 type Venue = 'ALL' | 'HOME' | 'AWAY';
 
 interface SliceRow {
+  eventId: string;
   result: 'WIN' | 'LOSS';
   selection: ObservationSelection;
   isHome: boolean | null;
@@ -168,6 +170,7 @@ export class CandidatesService {
 
       const tested: TestedCandidate[] = [];
       let eventsSeen = 0;
+      let leagueChanges = 0;
       const startedAt = Date.now();
       const report = (done: number) => {
         const elapsed = (Date.now() - startedAt) / 1000;
@@ -184,8 +187,9 @@ export class CandidatesService {
 
       for (const [index, team] of teams.entries()) {
         if (index > 0 && index % 10 === 0) report(index);
-        const rowsByKey = await this.loadTeamSlices(team.id);
+        const { byKey: rowsByKey, leagueChange } = await this.loadTeamSlices(team.id);
         eventsSeen += rowsByKey.size;
+        if (leagueChange) leagueChanges++;
 
         for (const [marketDefinitionId, rows] of rowsByKey) {
           // Fixture-level markets have no side to resolve; team markets do,
@@ -202,6 +206,7 @@ export class CandidatesService {
             rows,
             baselineMap,
             floor,
+            leagueChange,
           );
           if (combined) tested.push(combined);
 
@@ -224,6 +229,7 @@ export class CandidatesService {
               subset,
               baselineMap,
               floor,
+              leagueChange,
             );
             if (candidate) tested.push(candidate);
           }
@@ -289,7 +295,10 @@ export class CandidatesService {
           ? `No slice was distinguishable from its baseline. With ${tested.length} tests the first discovery must beat p=${gateThreshold.toExponential(2)}; deeper history or a narrower search is what moves this, not a lower threshold.`
           : `${surviving} of ${tested.length} slices cleared the gate.`;
 
-      this.logger.log(`Engine run ${run.id}: ${note}`);
+      this.logger.log(
+        `Engine run ${run.id}: ${note}` +
+          (leagueChanges ? ` ${leagueChanges} promoted/relegated teams judged on this season only.` : ''),
+      );
 
       return {
         engineRunId: run.id,
@@ -364,7 +373,9 @@ export class CandidatesService {
    * could not use the team index for one branch or the event index for the
    * other, so each team cost a scan of the whole observations table.
    */
-  private async loadTeamSlices(teamId: string): Promise<Map<string, SliceRow[]>> {
+  private async loadTeamSlices(
+    teamId: string,
+  ): Promise<{ byKey: Map<string, SliceRow[]>; leagueChange: LeagueChange | null }> {
     // Keyed by market alone: a team's home and away records for the same
     // market are one body of evidence until there is enough to split them.
     const since = new Date(Date.now() - this.LOOKBACK_DAYS * 24 * 3600_000);
@@ -376,7 +387,7 @@ export class CandidatesService {
       },
       select: { id: true, homeTeamId: true },
     });
-    if (matches.length === 0) return new Map();
+    if (matches.length === 0) return { byKey: new Map(), leagueChange: null };
     const homeTeamByEvent = new Map<string, string>(
       matches.map((m) => [String(m.id), String(m.homeTeamId)]),
     );
@@ -414,9 +425,24 @@ export class CandidatesService {
     ]);
 
     // Newest first across both, then the same safety cap as before.
-    const observations = [...own, ...fixture]
+    let observations = [...own, ...fixture]
       .sort((a, b) => new Date(b.kickoffAt).getTime() - new Date(a.kickoffAt).getTime())
       .slice(0, this.MAX_OBSERVATION_ROWS);
+
+    // A promoted or relegated side is judged on its current season alone:
+    // pooled with last season's league, the record describes neither team.
+    // The sample shrinks, so fewer of its slices reach the floor — which is
+    // the honest outcome until the new season has enough matches.
+    const leagueChange = detectLeagueChange(
+      observations.map((o) => ({
+        eventId: String(o.eventId),
+        leagueId: String(o.leagueId),
+        season: Number(o.season),
+      })),
+    );
+    if (leagueChange) {
+      observations = observations.filter((o) => Number(o.season) === leagueChange.season);
+    }
 
     const byKey = new Map<string, SliceRow[]>();
 
@@ -429,6 +455,7 @@ export class CandidatesService {
 
       const list = byKey.get(key) ?? [];
       list.push({
+        eventId: String(o.eventId),
         result: o.result as 'WIN' | 'LOSS',
         selection: o.selection,
         isHome,
@@ -439,7 +466,7 @@ export class CandidatesService {
       byKey.set(key, list);
     }
 
-    return byKey;
+    return { byKey, leagueChange };
   }
 
   private testSlice(
@@ -450,6 +477,7 @@ export class CandidatesService {
     rows: SliceRow[],
     baselineMap: Map<string, number>,
     minSample: number,
+    leagueChange: LeagueChange | null = null,
   ): TestedCandidate | null {
     if (rows.length < minSample) return null;
 
@@ -473,7 +501,10 @@ export class CandidatesService {
       entityId: teamId,
       marketDefinitionId,
       selection,
-      context: { venue },
+      // Recorded so a card can say its record is this season only, and why.
+      context: leagueChange
+        ? { venue, currentSeasonOnly: leagueChange.season, leagueChanged: true }
+        : { venue },
       sampleSize: rows.length,
       wins,
       hitRate,

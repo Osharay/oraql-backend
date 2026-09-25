@@ -77,7 +77,7 @@ describe('loadTeamSlices', () => {
       },
     });
 
-    const slices: Map<string, any[]> = await svc.loadTeamSlices('T');
+    const { byKey: slices }: { byKey: Map<string, any[]> } = await svc.loadTeamSlices('T');
     expect(slices.get('team-over')).toHaveLength(1);
     const btts = slices.get('btts')!;
     expect(btts.map((r) => r.isHome)).toEqual([true, false]);
@@ -86,7 +86,7 @@ describe('loadTeamSlices', () => {
 
   it('returns nothing without querying observations when the team has no matches', async () => {
     const { svc, prisma } = service();
-    const slices = await svc.loadTeamSlices('T');
+    const { byKey: slices } = await svc.loadTeamSlices('T');
     expect(slices.size).toBe(0);
     expect(prisma.marketObservation.findMany).not.toHaveBeenCalled();
   });
