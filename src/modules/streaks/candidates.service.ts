@@ -14,6 +14,7 @@ import {
 } from './stats.util';
 import { marketScope } from './market-definitions';
 import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
+import { currentSeasonRecord, SeasonRecord } from './season-record';
 
 type Venue = 'ALL' | 'HOME' | 'AWAY';
 
@@ -563,7 +564,7 @@ export class CandidatesService {
       take: limit,
     });
 
-    const withEntities = await this.attachEntities(candidates);
+    const withEntities = await this.attachEntities(await this.attachThisSeason(candidates));
 
     return {
       run,
@@ -719,6 +720,73 @@ export class CandidatesService {
       take: limit,
     });
 
-    return { run, candidates: await this.attachEntities(candidates) };
+    return {
+      run,
+      candidates: await this.attachEntities(await this.attachThisSeason(candidates)),
+    };
+  }
+
+  /**
+   * Each team candidate's record in the current season, from the same
+   * settled observations the long record counts. One small read per card,
+   * and a feed shows at most a few dozen.
+   */
+  private async attachThisSeason<
+    T extends {
+      entityType: string;
+      entityId: string;
+      marketDefinitionId: string;
+      selection: ObservationSelection | null;
+      context: unknown;
+    },
+  >(candidates: T[]): Promise<Array<T & { thisSeason: SeasonRecord | null }>> {
+    const since = new Date(Date.now() - this.LOOKBACK_DAYS * 24 * 3600_000);
+
+    return Promise.all(
+      candidates.map(async (c) => {
+        if (c.entityType !== 'TEAM') return { ...c, thisSeason: null };
+
+        const venue =
+          c.context && typeof c.context === 'object' && 'venue' in (c.context as object)
+            ? String((c.context as { venue?: unknown }).venue)
+            : 'ALL';
+        const settled = { in: [ObservationResult.WIN, ObservationResult.LOSS] };
+
+        const rows =
+          c.selection === ObservationSelection.MATCH
+            ? await this.prisma.marketObservation.findMany({
+                where: {
+                  marketDefinitionId: c.marketDefinitionId,
+                  selection: ObservationSelection.MATCH,
+                  result: settled,
+                  kickoffAt: { gte: since },
+                  event:
+                    venue === 'HOME'
+                      ? { homeTeamId: c.entityId }
+                      : venue === 'AWAY'
+                        ? { awayTeamId: c.entityId }
+                        : { OR: [{ homeTeamId: c.entityId }, { awayTeamId: c.entityId }] },
+                },
+                select: { season: true, result: true },
+              })
+            : await this.prisma.marketObservation.findMany({
+                where: {
+                  teamId: c.entityId,
+                  marketDefinitionId: c.marketDefinitionId,
+                  result: settled,
+                  kickoffAt: { gte: since },
+                  ...(venue === 'HOME' ? { isHome: true } : venue === 'AWAY' ? { isHome: false } : {}),
+                },
+                select: { season: true, result: true },
+              });
+
+        return {
+          ...c,
+          thisSeason: currentSeasonRecord(
+            rows.map((r) => ({ season: Number(r.season), result: String(r.result) })),
+          ),
+        };
+      }),
+    );
   }
 }
