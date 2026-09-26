@@ -588,51 +588,39 @@ export class ObservationsService {
     return { ...totals, complete };
   }
 
-  /**
-   * What we measure: finished matches in the competitions we cover, inside
-   * the derive window.
-   *
-   * Deriving everything was what filled the disk with U19 leagues and third
-   * divisions. Fixtures for those are kept — they cost almost nothing — but
-   * they are not turned into a hundred observation rows apiece.
-   */
-  private async scope(): Promise<Record<string, unknown>> {
-    const since = new Date(Date.now() - deriveSeasons() * 365 * 86_400_000);
-
-    const targets = await this.prisma.targetCompetition.findMany({
-      where: { isActive: true, externalId: { not: null } },
-      select: { externalId: true },
-    });
-    const ids = targets
-      .map((t) => String(t.externalId))
-      .filter((id: string) => !id.startsWith('unresolved:'));
-
-    return {
-      status: EventStatus.FINISHED,
-      kickoffAt: { gte: since },
-      // Until the target list is seeded, measure everything as before.
-      ...(ids.length ? { league: { externalId: { in: ids } } } : {}),
-    };
-  }
-
   /** Events with no observations first, then (optionally) incomplete ones. */
   private async selectBatch(
     limit: number,
     refresh: boolean,
     exclude: string[],
   ): Promise<{ ids: string[]; refreshed: number }> {
-    const scope = await this.scope();
-
-    const fresh = await this.prisma.event.findMany({
-      where: {
-        ...scope,
-        observations: { none: {} },
-        ...(exclude.length ? { id: { notIn: exclude } } : {}),
-      },
-      select: { id: true },
-      orderBy: { kickoffAt: 'desc' },
-      take: limit,
+    const since = new Date(Date.now() - deriveSeasons() * 365 * 86_400_000);
+    const targets = await this.prisma.targetCompetition.findMany({
+      where: { isActive: true, externalId: { not: null } },
+      select: { externalId: true },
     });
+    const targetIds: string[] = targets
+      .map((t) => String(t.externalId))
+      .filter((id: string) => !id.startsWith('unresolved:'));
+
+    // Raw SQL on purpose. Prisma writes `observations: { none: {} }` as
+    // `id NOT IN (SELECT "eventId" FROM market_observations)`, and with over a
+    // million rows that subquery no longer fits in memory as a hash, so
+    // Postgres re-scans it for every candidate event: one batch took well over
+    // an hour and held the database at full CPU. NOT EXISTS uses the
+    // (eventId, …) unique index and answers each event with one lookup.
+    const fresh = await this.prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT e.id
+      FROM events e
+      JOIN leagues l ON l.id = e."leagueId"
+      WHERE e.status = 'FINISHED'
+        AND e."kickoffAt" >= ${since}
+        AND (${targetIds.length} = 0 OR l."externalId" = ANY(${targetIds}::text[]))
+        AND NOT EXISTS (SELECT 1 FROM market_observations o WHERE o."eventId" = e.id)
+        AND NOT (e.id = ANY(${exclude}::text[]))
+      ORDER BY e."kickoffAt" DESC
+      LIMIT ${limit}
+    `;
 
     let ids = fresh.map((e) => e.id);
     let refreshed = 0;
