@@ -536,7 +536,7 @@ export class ObservationsService {
     options: {
       batch?: number;
       maxEvents?: number;
-      onProgress?: (p: { events: number; observations: number; refreshed: number; batches: number }) => void;
+      onProgress?: (p: Record<string, unknown>) => void;
     } = {},
   ): Promise<{ events: number; observations: number; refreshed: number; batches: number; complete: boolean }> {
     const batch = Math.max(1, Math.min(options.batch ?? 500, 2000));
@@ -550,6 +550,24 @@ export class ObservationsService {
     // fifteen, growing every batch, so the run slowed as it went.
     const seen = new Set<string>();
     const recent: string[] = [];
+
+    // The run's size up front, so the banner can say "of N" and how long.
+    const toDo = Math.min(await this.countUnderived(), maxEvents);
+    const startedAt = Date.now();
+    const progress = () => {
+      const perEvent = totals.events > 0 ? (Date.now() - startedAt) / totals.events : 0;
+      const left = Math.max(0, toDo - totals.events);
+      return {
+        matches: toDo > 0 ? `${totals.events} of ${toDo}` : `${totals.events}`,
+        observations: totals.observations,
+        batches: totals.batches,
+        ...(totals.refreshed ? { 'topped up': totals.refreshed } : {}),
+        ...(perEvent > 0 && left > 0
+          ? { 'about minutes left': Math.max(1, Math.round((left * perEvent) / 60_000)) }
+          : {}),
+      };
+    };
+    options.onProgress?.(progress());
 
     while (totals.events < maxEvents) {
       const selected = await this.selectBatch(
@@ -575,7 +593,7 @@ export class ObservationsService {
       totals.events += ids.length;
       totals.refreshed += refreshed;
       totals.batches += 1;
-      options.onProgress?.({ ...totals });
+      options.onProgress?.(progress());
       this.logger.log(
         `Derive batch ${totals.batches}: ${ids.length} events (${totals.events} so far, ${totals.observations} observations)`,
       );
@@ -588,12 +606,8 @@ export class ObservationsService {
     return { ...totals, complete };
   }
 
-  /** Events with no observations first, then (optionally) incomplete ones. */
-  private async selectBatch(
-    limit: number,
-    refresh: boolean,
-    exclude: string[],
-  ): Promise<{ ids: string[]; refreshed: number }> {
+  /** The derive window and the covered competitions' provider ids. */
+  private async deriveScope(): Promise<{ since: Date; targetIds: string[] }> {
     const since = new Date(Date.now() - deriveSeasons() * 365 * 86_400_000);
     const targets = await this.prisma.targetCompetition.findMany({
       where: { isActive: true, externalId: { not: null } },
@@ -602,6 +616,35 @@ export class ObservationsService {
     const targetIds: string[] = targets
       .map((t) => String(t.externalId))
       .filter((id: string) => !id.startsWith('unresolved:'));
+    return { since, targetIds };
+  }
+
+  /**
+   * How many finished matches in scope have no observations yet — the size of
+   * a run's main job, so its progress can say "of N" and estimate time left.
+   * Matches only being topped up (new markets, late stats) come on top.
+   */
+  async countUnderived(): Promise<number> {
+    const { since, targetIds } = await this.deriveScope();
+    const rows = await this.prisma.$queryRaw<Array<{ n: bigint | number }>>`
+      SELECT COUNT(*) AS n
+      FROM events e
+      JOIN leagues l ON l.id = e."leagueId"
+      WHERE e.status = 'FINISHED'
+        AND e."kickoffAt" >= ${since}
+        AND (${targetIds.length} = 0 OR l."externalId" = ANY(${targetIds}::text[]))
+        AND NOT EXISTS (SELECT 1 FROM market_observations o WHERE o."eventId" = e.id)
+    `;
+    return Number(rows[0]?.n ?? 0);
+  }
+
+  /** Events with no observations first, then (optionally) incomplete ones. */
+  private async selectBatch(
+    limit: number,
+    refresh: boolean,
+    exclude: string[],
+  ): Promise<{ ids: string[]; refreshed: number }> {
+    const { since, targetIds } = await this.deriveScope();
 
     // Raw SQL on purpose. Prisma writes `observations: { none: {} }` as
     // `id NOT IN (SELECT "eventId" FROM market_observations)`, and with over a
