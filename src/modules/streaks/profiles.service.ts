@@ -33,23 +33,10 @@ export class ProfilesService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async computeAll(): Promise<{ written: number; watch: number; caution: number }> {
-    const observations = await this.prisma.marketObservation.findMany({
-      where: {
-        result: { in: [ObservationResult.WIN, ObservationResult.LOSS] },
-        teamId: { not: null },
-      },
-      select: {
-        teamId: true,
-        marketDefinitionId: true,
-        result: true,
-        leagueId: true,
-        season: true,
-        kickoffAt: true,
-      },
-      orderBy: { kickoffAt: 'desc' },
-    });
+  /** Teams per read. Keeps each result well under Node's string limit. */
+  private readonly TEAM_CHUNK = 200;
 
+  async computeAll(): Promise<{ written: number; watch: number; caution: number }> {
     const baselines = await this.prisma.marketBaseline.findMany({
       select: {
         marketDefinitionId: true,
@@ -67,82 +54,106 @@ export class ProfilesService {
       );
     }
 
-    // team::market -> results, newest first (the query is already ordered)
-    const grouped = new Map<
-      string,
-      { results: Array<'WIN' | 'LOSS'>; leagueId: string; season: number }
-    >();
-
-    for (const o of observations) {
-      const key = `${o.teamId}::${o.marketDefinitionId}`;
-      const entry = grouped.get(key) ?? {
-        results: [],
-        leagueId: o.leagueId,
-        season: o.season,
-      };
-      entry.results.push(o.result as 'WIN' | 'LOSS');
-      grouped.set(key, entry);
-    }
-
     let written = 0;
     let watch = 0;
     let caution = 0;
 
-    for (const [key, entry] of grouped) {
-      if (entry.results.length < this.MIN_SAMPLE) continue;
+    // Read a few hundred teams at a time. Loading every settled observation in
+    // one findMany (millions of rows) overflowed the engine's result string:
+    // "Failed to convert rust String into napi string". Each chunk uses the
+    // (teamId, marketDefinitionId, kickoffAt) index.
+    const teams = await this.prisma.team.findMany({ select: { id: true }, orderBy: { id: 'asc' } });
 
-      const [teamId, marketDefinitionId] = key.split('::');
-      const sampleSize = entry.results.length;
-      const wins = entry.results.filter((r) => r === 'WIN').length;
-      const hitRate = wins / sampleSize;
-
-      const baselineRate =
-        baselineMap.get(`${marketDefinitionId}::${entry.leagueId}::${entry.season}`) ??
-        baselineMap.get(`${marketDefinitionId}::GLOBAL::GLOBAL`);
-
-      // Without a baseline there is no lift, and a profile without lift is
-      // just a hit rate wearing a badge.
-      if (baselineRate == null) continue;
-
-      const lift = hitRate - baselineRate;
-      const variance = windowedVariance(entry.results, 5);
-
-      let flag: ProfileFlag = ProfileFlag.NEUTRAL;
-      if (variance != null && variance > this.CAUTION_VARIANCE) {
-        flag = ProfileFlag.CAUTION;
-      } else if (lift >= this.WATCH_LIFT) {
-        flag = ProfileFlag.WATCH;
-      }
-
-      if (flag === ProfileFlag.WATCH) watch++;
-      if (flag === ProfileFlag.CAUTION) caution++;
-
-      await this.prisma.teamMarketProfile.upsert({
-        where: { teamId_marketDefinitionId: { teamId, marketDefinitionId } },
-        create: {
-          teamId,
-          marketDefinitionId,
-          sampleSize,
-          wins,
-          hitRate,
-          baselineRate,
-          lift,
-          variance,
-          flag,
+    for (let i = 0; i < teams.length; i += this.TEAM_CHUNK) {
+      const teamIds = teams.slice(i, i + this.TEAM_CHUNK).map((t: { id: string }) => t.id);
+      const observations = await this.prisma.marketObservation.findMany({
+        where: {
+          result: { in: [ObservationResult.WIN, ObservationResult.LOSS] },
+          teamId: { in: teamIds },
         },
-        update: {
-          sampleSize,
-          wins,
-          hitRate,
-          baselineRate,
-          lift,
-          variance,
-          flag,
-          lastComputedAt: new Date(),
+        select: {
+          teamId: true,
+          marketDefinitionId: true,
+          result: true,
+          leagueId: true,
+          season: true,
         },
+        orderBy: { kickoffAt: 'desc' },
       });
 
-      written++;
+      // team::market -> results, newest first (the query is already ordered)
+      const grouped = new Map<
+        string,
+        { results: Array<'WIN' | 'LOSS'>; leagueId: string; season: number }
+      >();
+
+      for (const o of observations) {
+        const key = `${o.teamId}::${o.marketDefinitionId}`;
+        const entry = grouped.get(key) ?? {
+          results: [] as Array<'WIN' | 'LOSS'>,
+          leagueId: o.leagueId,
+          season: o.season,
+        };
+        entry.results.push(o.result as 'WIN' | 'LOSS');
+        grouped.set(key, entry);
+      }
+
+      for (const [key, entry] of grouped) {
+        if (entry.results.length < this.MIN_SAMPLE) continue;
+
+        const [teamId, marketDefinitionId] = key.split('::');
+        const sampleSize = entry.results.length;
+        const wins = entry.results.filter((r) => r === 'WIN').length;
+        const hitRate = wins / sampleSize;
+
+        const baselineRate =
+          baselineMap.get(`${marketDefinitionId}::${entry.leagueId}::${entry.season}`) ??
+          baselineMap.get(`${marketDefinitionId}::GLOBAL::GLOBAL`);
+
+        // Without a baseline there is no lift, and a profile without lift is
+        // just a hit rate wearing a badge.
+        if (baselineRate == null) continue;
+
+        const lift = hitRate - baselineRate;
+        const variance = windowedVariance(entry.results, 5);
+
+        let flag: ProfileFlag = ProfileFlag.NEUTRAL;
+        if (variance != null && variance > this.CAUTION_VARIANCE) {
+          flag = ProfileFlag.CAUTION;
+        } else if (lift >= this.WATCH_LIFT) {
+          flag = ProfileFlag.WATCH;
+        }
+
+        if (flag === ProfileFlag.WATCH) watch++;
+        if (flag === ProfileFlag.CAUTION) caution++;
+
+        await this.prisma.teamMarketProfile.upsert({
+          where: { teamId_marketDefinitionId: { teamId, marketDefinitionId } },
+          create: {
+            teamId,
+            marketDefinitionId,
+            sampleSize,
+            wins,
+            hitRate,
+            baselineRate,
+            lift,
+            variance,
+            flag,
+          },
+          update: {
+            sampleSize,
+            wins,
+            hitRate,
+            baselineRate,
+            lift,
+            variance,
+            flag,
+            lastComputedAt: new Date(),
+          },
+        });
+
+        written++;
+      }
     }
 
     this.logger.log(
