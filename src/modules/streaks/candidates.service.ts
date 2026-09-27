@@ -16,6 +16,7 @@ import {
 import { marketScope } from './market-definitions';
 import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
 import { currentSeasonRecord, SeasonRecord } from './season-record';
+import { bandOf, OpponentSplit, sidesFor, splitByOpponent } from './opponent-split';
 import { firstFixtureByTeam } from './next-fixture';
 import { detectLeagueChange, LeagueChange } from './league-change';
 
@@ -743,6 +744,15 @@ export class CandidatesService {
       const displayName = (c as unknown as { marketDefinition?: { displayName?: string } })
         .marketDefinition?.displayName;
       const teamName = entity?.type === 'TEAM' ? entity.name : null;
+      const fixture = entity?.type === 'TEAM' ? (nextFixtures.get(entity.id) ?? null) : null;
+      const split = (c as unknown as { opponentSplit?: OpponentSplit | null }).opponentSplit ?? null;
+      // Which part of the record matches the next opponent, from today's ratings.
+      const nextBand = (f: typeof fixture) => {
+        if (!f?.strength) return null;
+        const mine = f.isHome ? f.strength.home.rating : f.strength.away.rating;
+        const theirs = f.isHome ? f.strength.away.rating : f.strength.home.rating;
+        return bandOf(mine, theirs);
+      };
 
       return {
         ...c,
@@ -752,7 +762,8 @@ export class CandidatesService {
         // market covers one club or the match.
         marketLabel: displayName ? streakMarketLabel(displayName, scope, teamName) : undefined,
         subject: marketSubjectOf(scope, teamName),
-        nextFixture: entity?.type === 'TEAM' ? (nextFixtures.get(entity.id) ?? null) : null,
+        nextFixture: fixture,
+        ...(split ? { opponentSplit: { ...split, next: nextBand(fixture) } } : {}),
       };
     });
   }
@@ -795,12 +806,14 @@ export class CandidatesService {
       selection: ObservationSelection | null;
       context: unknown;
     },
-  >(candidates: T[]): Promise<Array<T & { thisSeason: SeasonRecord | null }>> {
+  >(
+    candidates: T[],
+  ): Promise<Array<T & { thisSeason: SeasonRecord | null; opponentSplit: OpponentSplit | null }>> {
     const since = new Date(Date.now() - this.LOOKBACK_DAYS * 24 * 3600_000);
 
     return Promise.all(
       candidates.map(async (c) => {
-        if (c.entityType !== 'TEAM') return { ...c, thisSeason: null };
+        if (c.entityType !== 'TEAM') return { ...c, thisSeason: null, opponentSplit: null };
 
         const venue =
           c.context && typeof c.context === 'object' && 'venue' in (c.context as object)
@@ -823,7 +836,11 @@ export class CandidatesService {
                         ? { awayTeamId: c.entityId }
                         : { OR: [{ homeTeamId: c.entityId }, { awayTeamId: c.entityId }] },
                 },
-                select: { season: true, result: true },
+                select: {
+                  season: true,
+                  result: true,
+                  event: { select: { homeTeamId: true, homeRatingBefore: true, awayRatingBefore: true } },
+                },
               })
             : await this.prisma.marketObservation.findMany({
                 where: {
@@ -833,14 +850,36 @@ export class CandidatesService {
                   kickoffAt: { gte: since },
                   ...(venue === 'HOME' ? { isHome: true } : venue === 'AWAY' ? { isHome: false } : {}),
                 },
-                select: { season: true, result: true },
+                select: {
+                  season: true,
+                  result: true,
+                  isHome: true,
+                  event: { select: { homeTeamId: true, homeRatingBefore: true, awayRatingBefore: true } },
+                },
               });
+
+        // The same matches, split by how strong the opponent was going in.
+        const opponentSplit = splitByOpponent(
+          rows.map((r) => {
+            const row = r as {
+              result: unknown;
+              isHome?: boolean | null;
+              event: { homeTeamId: string; homeRatingBefore: number | null; awayRatingBefore: number | null };
+            };
+            const teamIsHome = row.isHome ?? row.event.homeTeamId === c.entityId;
+            return {
+              result: String(row.result),
+              ...sidesFor(teamIsHome, row.event.homeRatingBefore, row.event.awayRatingBefore),
+            };
+          }),
+        );
 
         return {
           ...c,
           thisSeason: currentSeasonRecord(
             rows.map((r) => ({ season: Number(r.season), result: String(r.result) })),
           ),
+          opponentSplit,
         };
       }),
     );
