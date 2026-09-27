@@ -9,6 +9,7 @@ import { SnapshotsService } from './snapshots.service';
 import { PerformanceService } from './performance.service';
 import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
+import { RatingsService } from './ratings.service';
 import { FormService, Venue } from './form.service';
 import { BoardService } from './board.service';
 import type { BoardSort } from './market-board';
@@ -44,6 +45,7 @@ export class StreaksController {
     private readonly performance: PerformanceService,
     private readonly clusters: ClustersService,
     private readonly profiles: ProfilesService,
+    private readonly ratings: RatingsService,
     private readonly form: FormService,
     private readonly board: BoardService,
     private readonly jobs: EngineJobsService,
@@ -118,6 +120,16 @@ export class StreaksController {
   @HttpCode(202)
   computeBaselines() {
     return accepted(this.jobs.start('baselines', () => this.baselines.computeAll()));
+  }
+
+  @Post('ratings/compute')
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: 'Rebuild team ratings (Elo) from every finished match' })
+  @HttpCode(202)
+  computeRatings() {
+    return accepted(
+      this.jobs.start('ratings', (report) => this.ratings.computeAll({ onProgress: report })),
+    );
   }
 
   @Post('engine/run')

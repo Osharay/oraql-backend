@@ -5,6 +5,8 @@
  * say it.
  */
 
+import { compareSides } from './elo';
+
 export type CompetitionKind = 'LEAGUE' | 'CUP';
 
 // Knockout and continental competitions. The provider files cups as leagues,
@@ -30,6 +32,23 @@ export interface NextFixture {
   away: { id: string; name: string };
   isHome: boolean;
   competition: { name: string; country: string | null; kind: CompetitionKind; round: string | null };
+  /** Who is stronger going in, from the team ratings. Null until both are rated. */
+  strength: {
+    home: { rating: number; tier: string | null };
+    away: { rating: number; tier: string | null };
+    stronger: 'HOME' | 'AWAY' | 'EVEN';
+  } | null;
+}
+
+type RatedTeam = { id: string; name: string; rating?: number | null; ratingTier?: string | null };
+
+function strengthOf(home: RatedTeam, away: RatedTeam): NextFixture['strength'] {
+  if (home.rating == null || away.rating == null) return null;
+  return {
+    home: { rating: Math.round(home.rating), tier: home.ratingTier ?? null },
+    away: { rating: Math.round(away.rating), tier: away.ratingTier ?? null },
+    stronger: compareSides(home.rating, away.rating).stronger,
+  };
 }
 
 /** Each team's first fixture from a list already ordered by kickoff. */
@@ -39,8 +58,8 @@ export function firstFixtureByTeam(
     id: string;
     kickoffAt: Date;
     round: string | null;
-    homeTeam: { id: string; name: string };
-    awayTeam: { id: string; name: string };
+    homeTeam: RatedTeam;
+    awayTeam: RatedTeam;
     league: { name: string; country: string | null };
   }>,
 ): Map<string, NextFixture> {
@@ -55,8 +74,8 @@ export function firstFixtureByTeam(
       out.set(teamId, {
         eventId: e.id,
         kickoffAt: e.kickoffAt,
-        home: e.homeTeam,
-        away: e.awayTeam,
+        home: { id: e.homeTeam.id, name: e.homeTeam.name },
+        away: { id: e.awayTeam.id, name: e.awayTeam.name },
         isHome,
         competition: {
           name: e.league.name,
@@ -64,6 +83,7 @@ export function firstFixtureByTeam(
           kind: competitionKind(e.league.name, e.round),
           round: e.round,
         },
+        strength: strengthOf(e.homeTeam, e.awayTeam),
       });
     }
   }

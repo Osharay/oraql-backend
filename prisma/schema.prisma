@@ -150,6 +150,15 @@ model Team {
   venueCity       String?
   venueName       String?
 
+  /// Elo rating from results (RatingsService). Null until rated.
+  rating          Float?
+  ratingMatches   Int?
+  /// STRONG / AVERAGE / WEAK: third of its league by rating.
+  ratingTier      String?
+  /// The league the tier is measured within.
+  ratingLeagueId  String?
+  ratedAt         DateTime?
+
   // Relations
   homeEvents      Event[]  @relation("HomeTeam")
   awayEvents      Event[]  @relation("AwayTeam")
@@ -243,6 +252,11 @@ model Event {
   /// which inputs (stats, half-time, score) were present. Re-derived only when
   /// it no longer matches. See streaks/derive-signature.ts.
   derivedSignature   String?
+
+  /// Each side's rating going into the match, for splitting records by
+  /// opponent strength.
+  homeRatingBefore   Float?
+  awayRatingBefore   Float?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 

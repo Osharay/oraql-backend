@@ -6,6 +6,7 @@ import { SnapshotsService } from './snapshots.service';
 import { PerformanceService } from './performance.service';
 import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
+import { RatingsService } from './ratings.service';
 import { FormService } from './form.service';
 import { EngineJobsService } from './engine-jobs.service';
 import { BoardService } from './board.service';
@@ -28,6 +29,7 @@ import { StreaksController } from './streaks.controller';
     PerformanceService,
     ClustersService,
     ProfilesService,
+    RatingsService,
     FormService,
     BoardService,
     EngineJobsService,
@@ -41,6 +43,7 @@ import { StreaksController } from './streaks.controller';
     PerformanceService,
     ClustersService,
     ProfilesService,
+    RatingsService,
   ],
 })
 export class StreaksModule {}

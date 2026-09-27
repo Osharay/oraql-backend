@@ -35,5 +35,24 @@ describe('firstFixtureByTeam', () => {
       competition: { name: 'League Two', country: 'England', kind: 'LEAGUE' },
     });
     expect(map.has('york')).toBe(false);
+    expect(map.get('nor')!.strength).toBeNull();
+  });
+
+  it('says who is stronger once both sides are rated', () => {
+    const events = [
+      {
+        id: 'e1',
+        kickoffAt: new Date('2026-10-10T14:00:00Z'),
+        round: 'Regular Season - 9',
+        homeTeam: { ...york, rating: 1580, ratingTier: 'STRONG' },
+        awayTeam: { ...nor, rating: 1420, ratingTier: 'WEAK' },
+        league,
+      },
+    ];
+    expect(firstFixtureByTeam(['nor'], events).get('nor')!.strength).toEqual({
+      home: { rating: 1580, tier: 'STRONG' },
+      away: { rating: 1420, tier: 'WEAK' },
+      stronger: 'HOME',
+    });
   });
 });

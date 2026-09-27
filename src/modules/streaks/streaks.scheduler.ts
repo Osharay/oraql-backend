@@ -6,6 +6,7 @@ import { CandidatesService } from './candidates.service';
 import { SnapshotsService } from './snapshots.service';
 import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
+import { RatingsService } from './ratings.service';
 
 /**
  * The engine's daily rhythm.
@@ -34,6 +35,7 @@ export class StreaksScheduler {
     private readonly snapshots: SnapshotsService,
     private readonly clusters: ClustersService,
     private readonly profiles: ProfilesService,
+    private readonly ratings: RatingsService,
   ) {}
 
   /** Keep the database registry in step with the code registry. */
@@ -64,6 +66,8 @@ export class StreaksScheduler {
       // they were derived; the half-hourly settlement run stays cheap.
       const derived = await this.observations.deriveForFinishedEvents(500, { refresh: true });
       const baselines = await this.baselines.computeAll();
+      // Ratings before the engine, so it can read opponent strength.
+      const rated = await this.ratings.computeAll();
       const run = await this.candidates.runEngine();
       const captured = await this.snapshots.captureForUpcoming();
       // Clusters build from snapshots, so they come after capture.
@@ -72,6 +76,7 @@ export class StreaksScheduler {
 
       this.logger.log(
         `Cycle complete — observations: ${derived.observations}, baselines: ${baselines.written}, ` +
+          `rated teams: ${rated.teams}, ` +
           `tested: ${run.tested}, survived: ${run.surviving}, snapshots: ${captured.captured}, ` +
           `clusters: ${clusters.created}, profiles: ${profiles.written}`,
       );
