@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
 import {
+  EventStatus,
   ObservationResult,
   ObservationSelection,
   Prisma,
@@ -15,6 +16,7 @@ import {
 import { marketScope } from './market-definitions';
 import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
 import { currentSeasonRecord, SeasonRecord } from './season-record';
+import { firstFixtureByTeam } from './next-fixture';
 import { detectLeagueChange, LeagueChange } from './league-change';
 
 type Venue = 'ALL' | 'HOME' | 'AWAY';
@@ -692,7 +694,8 @@ export class CandidatesService {
     const teamIds = candidates.filter((c) => c.entityType === 'TEAM').map((c) => c.entityId);
     const leagueIds = candidates.filter((c) => c.entityType === 'LEAGUE').map((c) => c.entityId);
 
-    const [teams, leagues] = await Promise.all([
+    const uniqueTeamIds = Array.from(new Set(teamIds));
+    const [teams, leagues, upcoming] = await Promise.all([
       teamIds.length
         ? this.prisma.team.findMany({
             where: { id: { in: Array.from(new Set(teamIds)) } },
@@ -705,7 +708,28 @@ export class CandidatesService {
             select: { id: true, name: true },
           })
         : Promise.resolve([]),
+      // The match each team's card is about: who, where, when, and in what.
+      uniqueTeamIds.length
+        ? this.prisma.event.findMany({
+            where: {
+              kickoffAt: { gte: new Date() },
+              status: { in: [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED] },
+              OR: [{ homeTeamId: { in: uniqueTeamIds } }, { awayTeamId: { in: uniqueTeamIds } }],
+            },
+            orderBy: { kickoffAt: 'asc' },
+            select: {
+              id: true,
+              kickoffAt: true,
+              round: true,
+              homeTeam: { select: { id: true, name: true } },
+              awayTeam: { select: { id: true, name: true } },
+              league: { select: { name: true, country: true } },
+            },
+            take: 500,
+          })
+        : Promise.resolve([]),
     ]);
+    const nextFixtures = firstFixtureByTeam(uniqueTeamIds, upcoming);
 
     const byId = new Map<string, { id: string; type: string; name: string; shortName: string | null }>();
     for (const t of teams) byId.set(t.id, { id: t.id, type: 'TEAM', name: t.name, shortName: t.shortName ?? null });
@@ -728,6 +752,7 @@ export class CandidatesService {
         // market covers one club or the match.
         marketLabel: displayName ? streakMarketLabel(displayName, scope, teamName) : undefined,
         subject: marketSubjectOf(scope, teamName),
+        nextFixture: entity?.type === 'TEAM' ? (nextFixtures.get(entity.id) ?? null) : null,
       };
     });
   }
