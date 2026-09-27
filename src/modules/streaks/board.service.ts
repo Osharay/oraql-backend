@@ -13,7 +13,8 @@ import {
   combineSides,
   compareBoard,
   confidenceOf,
-  shrunkRate,
+  agreementOf,
+  type Agreement,
   type Confidence,
   type SideEvidence,
 } from './market-board';
@@ -39,6 +40,8 @@ export interface BoardRowOut {
   evidence: SideEvidence[];
   /** True when the gated engine also found this slice significant here. */
   gated: boolean;
+  /** Whether both sides' records lean the same way on this market. */
+  agreement: Agreement | null;
 }
 
 /**
@@ -106,6 +109,14 @@ export class BoardService {
 
     const gated = await this.gatedSlices(eventId);
 
+    // What each side lets opponents do where it plays this fixture: the other
+    // half of a team market. Northampton scoring under 1.5 away is also York
+    // keeping home opponents under 1.5.
+    const [homeAllows, awayAllows] = await Promise.all([
+      this.opponentRecord(event.homeTeamId, 'HOME'),
+      this.opponentRecord(event.awayTeamId, 'AWAY'),
+    ]);
+
     const rows: BoardRowOut[] = [];
 
     for (const def of MARKET_DEFINITIONS) {
@@ -118,13 +129,25 @@ export class BoardService {
       if (scope === 'TEAM') {
         // One row per club: only one team can win to nil, and the board has
         // to say which team each row is about.
-        for (const [side, name, teamId, row] of [
-          ['HOME', homeName, event.homeTeamId, h],
-          ['AWAY', awayName, event.awayTeamId, a],
+        for (const [side, name, teamId, row, oppName, allows] of [
+          ['HOME', homeName, event.homeTeamId, h, awayName, awayAllows.get(def.marketId)],
+          ['AWAY', awayName, event.awayTeamId, a, homeName, homeAllows.get(def.marketId)],
         ] as const) {
-          const wins = row?.longWins ?? 0;
-          const played = row?.longPlayed ?? 0;
-          const probability = shrunkRate(wins, played, baseline);
+          const own = {
+            label: `${name} ${side === 'HOME' ? 'at home' : 'away'}`,
+            wins: row?.longWins ?? 0,
+            played: row?.longPlayed ?? 0,
+          };
+          const against = {
+            label: `${oppName}'s ${side === 'HOME' ? 'away' : 'home'} opponents`,
+            wins: allows?.wins ?? 0,
+            played: allows?.played ?? 0,
+          };
+          const sides = against.played > 0 ? [own, against] : [own];
+          const combined = combineSides(sides, baseline);
+          const wins = combined.wins;
+          const played = combined.played;
+          const probability = combined.probability;
 
           rows.push({
             marketId: def.marketId,
@@ -145,14 +168,9 @@ export class BoardService {
             confidenceNote: CONFIDENCE_NOTE[confidenceOf(played)],
             recent: row?.recent ?? '',
             currentRun: row?.currentRun ?? 0,
-            evidence: [
-              {
-                label: `${name} ${side === 'HOME' ? 'at home' : 'away'}`,
-                wins,
-                played,
-              },
-            ],
+            evidence: sides,
             gated: gated.has(`${def.marketId}::${teamId}`),
+            agreement: agreementOf([own, against], baseline),
           });
         }
         continue;
@@ -187,6 +205,7 @@ export class BoardService {
         gated:
           gated.has(`${def.marketId}::${event.homeTeamId}`) ||
           gated.has(`${def.marketId}::${event.awayTeamId}`),
+        agreement: agreementOf(evidence, baseline),
       });
     }
 
@@ -219,6 +238,41 @@ export class BoardService {
         'a high number is only worth acting on if the odds are longer than it.',
       rows: rows.slice(0, limit),
     };
+  }
+
+  /**
+   * How a team's opponents have done in each team market, at the venue the
+   * team plays this fixture — what it concedes, in effect. Two years, the
+   * same window as the team's own record.
+   */
+  private async opponentRecord(
+    teamId: string,
+    venue: 'HOME' | 'AWAY',
+  ): Promise<Map<string, { wins: number; played: number }>> {
+    const since = new Date(Date.now() - 730 * 86_400_000);
+    const rows =
+      venue === 'HOME'
+        ? await this.prisma.$queryRaw<Array<{ marketId: string; wins: bigint | number; played: bigint | number }>>`
+            SELECT md."marketId", COUNT(*) FILTER (WHERE o.result = 'WIN') AS wins, COUNT(*) AS played
+            FROM events e
+            JOIN market_observations o ON o."eventId" = e.id AND o."teamId" = e."awayTeamId"
+            JOIN market_definitions md ON md.id = o."marketDefinitionId"
+            WHERE e."homeTeamId" = ${teamId}
+              AND e.status = 'FINISHED'
+              AND e."kickoffAt" >= ${since}
+              AND o.result IN ('WIN', 'LOSS')
+            GROUP BY md."marketId"`
+        : await this.prisma.$queryRaw<Array<{ marketId: string; wins: bigint | number; played: bigint | number }>>`
+            SELECT md."marketId", COUNT(*) FILTER (WHERE o.result = 'WIN') AS wins, COUNT(*) AS played
+            FROM events e
+            JOIN market_observations o ON o."eventId" = e.id AND o."teamId" = e."homeTeamId"
+            JOIN market_definitions md ON md.id = o."marketDefinitionId"
+            WHERE e."awayTeamId" = ${teamId}
+              AND e.status = 'FINISHED'
+              AND e."kickoffAt" >= ${since}
+              AND o.result IN ('WIN', 'LOSS')
+            GROUP BY md."marketId"`;
+    return new Map(rows.map((r) => [r.marketId, { wins: Number(r.wins), played: Number(r.played) }]));
   }
 
   /**

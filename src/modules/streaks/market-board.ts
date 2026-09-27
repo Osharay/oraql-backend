@@ -58,6 +58,40 @@ export function combineSides(sides: SideEvidence[], baseline: number | null, k =
 }
 
 /**
+ * Whether both sides of a fixture point the same way on a market — the
+ * client's "common ground": no team plays alone, so a lean is worth more when
+ * the other side's record says the same thing.
+ *
+ * For a match-wide market the sides are each team's matches at the venue it
+ * plays this one at. For a team market they are the team's own record and
+ * what the opponent lets teams like it do (its opponents' record at that
+ * venue).
+ *
+ * Each side leans FOR when its shrunk rate is at least LEAN above the
+ * market's usual rate, AGAINST when at least LEAN below. Sides with fewer than
+ * AGREEMENT_MIN matches do not get a vote.
+ */
+export type Agreement = 'AGREE_FOR' | 'AGREE_AGAINST' | 'SPLIT';
+export const LEAN = 0.05;
+export const AGREEMENT_MIN = 5;
+
+export function agreementOf(
+  sides: Array<{ wins: number; played: number }>,
+  baseline: number | null,
+): Agreement | null {
+  if (baseline == null || sides.length < 2) return null;
+  if (sides.some((s) => s.played < AGREEMENT_MIN)) return null;
+  const leans = sides.map((s) => {
+    const lean = shrunkRate(s.wins, s.played, baseline) - baseline;
+    return lean >= LEAN ? 1 : lean <= -LEAN ? -1 : 0;
+  });
+  if (leans.every((l) => l === 1)) return 'AGREE_FOR';
+  if (leans.every((l) => l === -1)) return 'AGREE_AGAINST';
+  if (leans.includes(1) && leans.includes(-1)) return 'SPLIT';
+  return null;
+}
+
+/**
  * How much to trust a row, in words, from the matches behind it.
  *
  * The bands are deliberately blunt. The client asked to see every market for

@@ -7,6 +7,7 @@ import {
   compareBoard,
   type BoardRow,
 } from './market-board';
+import { agreementOf } from './market-board';
 
 describe('shrunkRate', () => {
   it('pulls a perfect short record back towards the market', () => {
@@ -151,5 +152,23 @@ describe('compareBoard', () => {
     const short = row({ played: 12 });
     const long = row({ played: 60 });
     expect([short, long].sort(compareBoard())[0]).toBe(long);
+  });
+});
+
+describe('agreementOf', () => {
+  it('agrees when both sides lean the same way', () => {
+    // 20/25 and 16/20 on a 50% market both lean well above it.
+    expect(agreementOf([{ wins: 20, played: 25 }, { wins: 16, played: 20 }], 0.5)).toBe('AGREE_FOR');
+    expect(agreementOf([{ wins: 4, played: 25 }, { wins: 3, played: 20 }], 0.5)).toBe('AGREE_AGAINST');
+  });
+
+  it('calls it split when they pull opposite ways', () => {
+    expect(agreementOf([{ wins: 20, played: 25 }, { wins: 3, played: 20 }], 0.5)).toBe('SPLIT');
+  });
+
+  it('says nothing when a side is thin, level, or there is no baseline', () => {
+    expect(agreementOf([{ wins: 4, played: 4 }, { wins: 16, played: 20 }], 0.5)).toBeNull();
+    expect(agreementOf([{ wins: 13, played: 25 }, { wins: 16, played: 20 }], 0.5)).toBeNull();
+    expect(agreementOf([{ wins: 20, played: 25 }, { wins: 16, played: 20 }], null)).toBeNull();
   });
 });
