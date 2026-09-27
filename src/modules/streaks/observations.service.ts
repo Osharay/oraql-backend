@@ -552,7 +552,9 @@ export class ObservationsService {
     const recent: string[] = [];
 
     // The run's size up front, so the banner can say "of N" and how long.
-    const toDo = Math.min(await this.countUnderived(), maxEvents);
+    // Counts everything the run will touch: never-derived matches and those
+    // only being topped up (both have an out-of-date stamp).
+    const toDo = Math.min(await this.countOutdated(), maxEvents);
     const startedAt = Date.now();
     const progress = () => {
       const perEvent = totals.events > 0 ? (Date.now() - startedAt) / totals.events : 0;
@@ -620,12 +622,14 @@ export class ObservationsService {
   }
 
   /**
-   * How many finished matches in scope have no observations yet — the size of
-   * a run's main job, so its progress can say "of N" and estimate time left.
-   * Matches only being topped up (new markets, late stats) come on top.
+   * How many finished matches in scope a derive run still has to touch: never
+   * derived, or derived from older inputs. Unstamped matches (including every
+   * match with no observations) count, so this is the whole job's size.
+   * Same condition as findIncompleteEvents.
    */
-  async countUnderived(): Promise<number> {
+  async countOutdated(): Promise<number> {
     const { since, targetIds } = await this.deriveScope();
+    const hash = this.registryHashOf(await this.activeDefinitions());
     const rows = await this.prisma.$queryRaw<Array<{ n: bigint | number }>>`
       SELECT COUNT(*) AS n
       FROM events e
@@ -633,7 +637,19 @@ export class ObservationsService {
       WHERE e.status = 'FINISHED'
         AND e."kickoffAt" >= ${since}
         AND (${targetIds.length} = 0 OR l."externalId" = ANY(${targetIds}::text[]))
-        AND NOT EXISTS (SELECT 1 FROM market_observations o WHERE o."eventId" = e.id)
+        AND e."derivedSignature" IS DISTINCT FROM (
+          ${hash}
+          || ':' || CASE WHEN (
+               SELECT COUNT(*) FROM match_stats ms
+               WHERE ms."eventId" = e.id
+                 AND ms."teamId" IN (e."homeTeamId", e."awayTeamId")
+             ) = 2 THEN '1' ELSE '0' END
+          || ':' || CASE WHEN e."htHomeScore" IS NOT NULL AND e."htAwayScore" IS NOT NULL
+                    THEN '1' ELSE '0' END
+          || ':' || CASE WHEN COALESCE(e."ftHomeScore", e."homeScore") IS NOT NULL
+                          AND COALESCE(e."ftAwayScore", e."awayScore") IS NOT NULL
+                    THEN '1' ELSE '0' END
+        )
     `;
     return Number(rows[0]?.n ?? 0);
   }
