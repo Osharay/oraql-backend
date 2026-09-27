@@ -108,6 +108,9 @@ export class CandidatesService {
   /** Safety cap so a pathological team cannot pull an unbounded result set. */
   private readonly MAX_OBSERVATION_ROWS = 6000;
 
+  /** Emerging list: most markets shown for any one team. */
+  private readonly EMERGING_PER_TEAM = 3;
+
   /** Lift that earns full marks on the lift component of the score. */
   private readonly LIFT_FULL_MARKS = 0.3;
 
@@ -607,8 +610,16 @@ export class CandidatesService {
       const r = (c.context as { recent?: { wins: number; played: number } } | null)?.recent;
       return r && r.played > 0 ? r.wins / r.played : 0;
     };
+    // At most three per team: one hot side lifts a dozen related markets at
+    // once (Barnet had fifteen), which would fill the list with one story.
+    const perTeam = new Map<string, number>();
     const candidates = rows
       .sort((a, b) => recentRate(b) - b.baselineRate - (recentRate(a) - a.baselineRate))
+      .filter((c) => {
+        const n = perTeam.get(c.entityId) ?? 0;
+        perTeam.set(c.entityId, n + 1);
+        return n < this.EMERGING_PER_TEAM;
+      })
       .slice(0, limit);
 
     return {
