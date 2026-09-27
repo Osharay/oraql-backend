@@ -888,6 +888,7 @@ export class CandidatesService {
                   result: true,
                   event: { select: { homeTeamId: true, homeRatingBefore: true, awayRatingBefore: true } },
                 },
+                orderBy: { kickoffAt: 'desc' },
               })
             : await this.prisma.marketObservation.findMany({
                 where: {
@@ -903,11 +904,15 @@ export class CandidatesService {
                   isHome: true,
                   event: { select: { homeTeamId: true, homeRatingBefore: true, awayRatingBefore: true } },
                 },
+                orderBy: { kickoffAt: 'desc' },
               });
 
-        // The same matches, split by how strong the opponent was going in.
+        // The same matches the headline record counts — its newest
+        // `sampleSize` — split by how strong the opponent was going in. The
+        // engine reads a capped window, so the full two years would disagree
+        // with the card's own "82 of 91".
         const opponentSplit = splitByOpponent(
-          rows.map((r) => {
+          rows.slice(0, (c as unknown as { sampleSize?: number }).sampleSize ?? rows.length).map((r) => {
             const row = r as {
               result: unknown;
               isHome?: boolean | null;
