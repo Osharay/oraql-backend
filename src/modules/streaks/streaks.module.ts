@@ -7,6 +7,7 @@ import { PerformanceService } from './performance.service';
 import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
 import { RatingsService } from './ratings.service';
+import { SeasonRepairService } from './season-repair.service';
 import { FormService } from './form.service';
 import { EngineJobsService } from './engine-jobs.service';
 import { BoardService } from './board.service';
@@ -30,6 +31,7 @@ import { StreaksController } from './streaks.controller';
     ClustersService,
     ProfilesService,
     RatingsService,
+    SeasonRepairService,
     FormService,
     BoardService,
     EngineJobsService,

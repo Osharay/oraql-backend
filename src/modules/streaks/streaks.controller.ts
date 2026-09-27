@@ -10,6 +10,7 @@ import { PerformanceService } from './performance.service';
 import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
 import { RatingsService } from './ratings.service';
+import { SeasonRepairService } from './season-repair.service';
 import { FormService, Venue } from './form.service';
 import { BoardService } from './board.service';
 import type { BoardSort } from './market-board';
@@ -46,6 +47,7 @@ export class StreaksController {
     private readonly clusters: ClustersService,
     private readonly profiles: ProfilesService,
     private readonly ratings: RatingsService,
+    private readonly seasons: SeasonRepairService,
     private readonly form: FormService,
     private readonly board: BoardService,
     private readonly jobs: EngineJobsService,
@@ -120,6 +122,15 @@ export class StreaksController {
   @HttpCode(202)
   computeBaselines() {
     return accepted(this.jobs.start('baselines', () => this.baselines.computeAll()));
+  }
+
+  @Post('seasons/repair')
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: 'Give every match and observation its own season (one-off repair; safe to rerun)' })
+  @HttpCode(202)
+  repairSeasons() {
+    this.jobs.assertIdle(['derive', 'baselines', 'engine']);
+    return accepted(this.jobs.start('seasons', (report) => this.seasons.repair({ onProgress: report })));
   }
 
   @Post('ratings/compute')

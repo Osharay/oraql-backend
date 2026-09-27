@@ -226,6 +226,9 @@ model Event {
   kickoffAt       DateTime
   venue           String?
   round           String?      // e.g. "Regular Season - 15"
+  /// The provider's season for this fixture (2025 = 2025/26 in Europe).
+  /// Leagues store a single season, so this is the only per-match one.
+  season          Int?
 
   // Scores (updated live)
   homeScore       Int?

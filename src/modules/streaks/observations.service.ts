@@ -341,7 +341,8 @@ export class ObservationsService {
             line: def.line,
             result: result as ObservationResult,
             leagueId: event.league.id,
-            season: event.league.season,
+            // The match's own season; the league row holds one season forever.
+            season: event.season ?? event.league.season,
             teamId:
               side === 'HOME' ? event.homeTeamId : side === 'AWAY' ? event.awayTeamId : null,
             isHome: side === 'MATCH' ? null : side === 'HOME',
@@ -475,7 +476,8 @@ export class ObservationsService {
           line: def.line,
           result: result as ObservationResult,
           leagueId: event.league.id,
-          season: event.league.season,
+          // The match's own season; the league row holds one season forever.
+            season: event.season ?? event.league.season,
           teamId:
             side === 'HOME'
               ? event.homeTeamId

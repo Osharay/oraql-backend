@@ -814,6 +814,7 @@ export class IngestService {
         kickoffAt: fixture.kickoffAt,
         venue: fixture.venue,
         round: fixture.round,
+        season: fixture.league?.season ?? null,
         status: fixture.status as EventStatus,
         homeScore: fixture.homeScore,
         awayScore: fixture.awayScore,
@@ -827,6 +828,7 @@ export class IngestService {
         status: fixture.status as EventStatus,
         homeScore: fixture.homeScore,
         awayScore: fixture.awayScore,
+        ...(fixture.league?.season != null ? { season: fixture.league.season } : {}),
         // Only set when the payload carries them, so a later partial payload
         // cannot erase a half-time score that was already recorded.
         ...(fixture.htHomeScore != null && fixture.htAwayScore != null

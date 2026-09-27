@@ -29,7 +29,8 @@ export class BaselinesService {
    * VOID and UNKNOWN never enter the denominator — a void bet is not a loss,
    * and missing data is not evidence.
    */
-  async computeAll(): Promise<{ written: number; skipped: number }> {
+  async computeAll(): Promise<{ written: number; skipped: number; removed: number }> {
+    const startedAt = new Date();
     const grouped = await this.prisma.marketObservation.groupBy({
       by: ['marketDefinitionId', 'leagueId', 'season', 'result'],
       where: { result: { in: [ObservationResult.WIN, ObservationResult.LOSS] } },
@@ -78,8 +79,17 @@ export class BaselinesService {
       written++;
     }
 
-    this.logger.log(`Baselines: ${written} written, ${skipped} below the sample floor`);
-    return { written, skipped };
+    // Anything not rewritten this run no longer has observations behind it
+    // (a season relabelled, a league dropped) and would otherwise linger as a
+    // stale rate that a lookup could still hit.
+    const { count: removed } = await this.prisma.marketBaseline.deleteMany({
+      where: { computedAt: { lt: startedAt } },
+    });
+
+    this.logger.log(
+      `Baselines: ${written} written, ${skipped} below the sample floor, ${removed} stale removed`,
+    );
+    return { written, skipped, removed };
   }
 
   private async upsertBaseline(
@@ -104,7 +114,7 @@ export class BaselinesService {
     }
 
     await this.prisma.marketBaseline.create({
-      data: { marketDefinitionId, leagueId, season, wins, sampleSize, baselineRate },
+      data: { marketDefinitionId, leagueId, season, wins, sampleSize, baselineRate, computedAt: new Date() },
     });
   }
 
