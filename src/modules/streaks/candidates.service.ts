@@ -17,6 +17,7 @@ import { marketScope } from './market-definitions';
 import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
 import { currentSeasonRecord, SeasonRecord } from './season-record';
 import { bandOf, OpponentSplit, sidesFor, splitByOpponent } from './opponent-split';
+import { recentFormContext } from './recent-form';
 import { firstFixtureByTeam } from './next-fixture';
 import { detectLeagueChange, LeagueChange } from './league-change';
 
@@ -505,9 +506,14 @@ export class CandidatesService {
       marketDefinitionId,
       selection,
       // Recorded so a card can say its record is this season only, and why.
-      context: leagueChange
-        ? { venue, currentSeasonOnly: leagueChange.season, leagueChanged: true }
-        : { venue },
+      context: {
+        ...(leagueChange
+          ? { venue, currentSeasonOnly: leagueChange.season, leagueChanged: true }
+          : { venue }),
+        // Recent form alongside the long record: a weighted rate, the last
+        // fifteen, and whether the recent run stands out on its own.
+        ...recentFormContext(results, hitRate, baselineRate),
+      },
       sampleSize: rows.length,
       wins,
       hitRate,
@@ -571,6 +577,47 @@ export class CandidatesService {
   private last10Rate(last10: string): number {
     if (!last10.length) return 0;
     return [...last10].filter((c) => c === 'W').length / last10.length;
+  }
+
+  /**
+   * Slices strong in recent matches alone: they did not clear the two-season
+   * gate, but their last fifteen stand out from the market's usual rate by a
+   * margin chance rarely produces. Labelled "emerging", captured and settled
+   * like everything else, so whether they hold shows up in the record.
+   */
+  async getLatestEmerging(limit = 50) {
+    const run = await this.prisma.engineRun.findFirst({
+      where: { completedAt: { not: null } },
+      orderBy: { startedAt: 'desc' },
+      select: { id: true, candidatesTested: true },
+    });
+
+    if (!run) return { run: null, tier: 'emerging', candidates: [] };
+
+    const rows = await this.prisma.streakCandidate.findMany({
+      where: { engineRunId: run.id, survivedGate: false, context: { path: ['emerging'], equals: true } },
+      include: {
+        marketDefinition: { select: { marketId: true, displayName: true, shortName: true } },
+      },
+      take: 500,
+    });
+
+    // Strongest recent run first.
+    const recentRate = (c: { context: unknown }) => {
+      const r = (c.context as { recent?: { wins: number; played: number } } | null)?.recent;
+      return r && r.played > 0 ? r.wins / r.played : 0;
+    };
+    const candidates = rows
+      .sort((a, b) => recentRate(b) - b.baselineRate - (recentRate(a) - a.baselineRate))
+      .slice(0, limit);
+
+    return {
+      run,
+      tier: 'emerging',
+      caveat:
+        'Strong in the last fifteen matches, not across two seasons. A run like this can be the start of something or a hot spell; OraQL records how these settle before trusting them.',
+      candidates: await this.attachEntities(await this.attachThisSeason(candidates)),
+    };
   }
 
   /**

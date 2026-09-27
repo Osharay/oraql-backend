@@ -208,12 +208,13 @@ export class StreaksController {
 
   @Get('candidates')
   @ApiOperation({
-    summary: 'Latest run. tier=significant (default) cleared the gate; tier=suggestive did not',
+    summary: 'Latest run. tier=significant (default) cleared the gate; tier=suggestive did not; tier=emerging is strong in recent matches only',
   })
   async listCandidates(@Query('limit') limit?: string, @Query('tier') tier?: string) {
     const parsed = Number(limit);
     const take = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 200) : 50;
 
+    if (tier === 'emerging') return this.candidates.getLatestEmerging(take);
     return tier === 'suggestive'
       ? this.candidates.getLatestSuggestive(take)
       : this.candidates.getLatestSurvivors(take);

@@ -102,7 +102,22 @@ export class SnapshotsService {
         })
       : [];
 
-    const candidates = [...survivors, ...suggestive];
+    // Recent-form runs that two seasons do not show. Captured so they are
+    // settled and measured too — that is how they earn trust or lose it.
+    const emerging = includeSuggestive
+      ? await this.prisma.streakCandidate.findMany({
+          where: {
+            engineRunId: run.id,
+            survivedGate: false,
+            context: { path: ['emerging'], equals: true },
+          },
+          take: this.SUGGESTIVE_LIMIT,
+          select,
+        })
+      : [];
+    const already = new Set([...survivors, ...suggestive].map((c) => c.id));
+
+    const candidates = [...survivors, ...suggestive, ...emerging.filter((c) => !already.has(c.id))];
 
     if (candidates.length === 0) {
       return {
