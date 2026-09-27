@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
+import { coveredLeagueFilter } from '@/common/covered-leagues';
 import { Sport } from '@prisma/client';
 import { toFiniteNumber } from '@/common/utils/coerce';
 
@@ -62,6 +63,7 @@ export class PicksService {
     const endOfDay = new Date(targetDate);
     endOfDay.setHours(23, 59, 59, 999);
 
+    const covered = await coveredLeagueFilter(this.prisma);
     return this.prisma.pick.findMany({
       where: {
         isActive: true,
@@ -70,6 +72,7 @@ export class PicksService {
           kickoffAt: { gte: startOfDay, lte: endOfDay },
           status: { in: ['SCHEDULED', 'LINEUP_CONFIRMED'] },
           ...(sport && { sport }),
+          ...(covered && { league: covered }),
         },
       },
       include: {

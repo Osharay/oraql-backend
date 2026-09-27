@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { PrismaService } from '@/common/prisma/prisma.service';
+import { coveredLeagueFilter } from '@/common/covered-leagues';
 import { toFiniteNumber } from '@/common/utils/coerce';
 import { MarketCategory, Prisma } from '@prisma/client';
 
@@ -87,12 +88,14 @@ export class MarketsService {
     const endOfDay = new Date(targetDate);
     endOfDay.setHours(23, 59, 59, 999);
 
+    const covered = await coveredLeagueFilter(this.prisma);
     return this.prisma.market.findMany({
       where: {
         isValueBet: true,
         event: {
           kickoffAt: { gte: startOfDay, lte: endOfDay },
           status: { in: ['SCHEDULED', 'LINEUP_CONFIRMED'] },
+          ...(covered && { league: covered }),
         },
       },
       include: {

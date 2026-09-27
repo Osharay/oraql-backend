@@ -3,6 +3,7 @@ import { PrismaService } from '@/common/prisma/prisma.service';
 import { toFiniteNumber } from '@/common/utils/coerce';
 import { Sport, EventStatus, Prisma } from '@prisma/client';
 import { EventFilterDto } from './dto/event-filter.dto';
+import { coveredLeagueFilter } from '@/common/covered-leagues';
 
 @Injectable()
 export class EventsService {
@@ -31,6 +32,8 @@ export class EventsService {
     const endOfDay = new Date(targetDate);
     endOfDay.setHours(23, 59, 59, 999);
 
+    // Only competitions we cover: the rest have no history to show.
+    const covered = await coveredLeagueFilter(this.prisma);
     const where: Prisma.EventWhereInput = {
       sport,
       kickoffAt: {
@@ -39,6 +42,7 @@ export class EventsService {
       },
       ...(leagueIds?.length && { leagueId: { in: leagueIds } }),
       ...(status && { status }),
+      ...(covered && { league: covered }),
     };
 
     const [events, total] = await Promise.all([
@@ -182,11 +186,13 @@ export class EventsService {
     const now = new Date();
     const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
+    const covered = await coveredLeagueFilter(this.prisma);
     return this.prisma.event.findMany({
       where: {
         kickoffAt: { gte: now, lte: tomorrow },
         status: { in: [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED] },
         ...(sport && { sport }),
+        ...(covered && { league: covered }),
       },
       include: {
         league: { select: { name: true, logoUrl: true } },
@@ -202,10 +208,12 @@ export class EventsService {
    * Get live events.
    */
   async findLive(sport?: Sport) {
+    const covered = await coveredLeagueFilter(this.prisma);
     return this.prisma.event.findMany({
       where: {
         status: { in: [EventStatus.LIVE, EventStatus.HALF_TIME] },
         ...(sport && { sport }),
+        ...(covered && { league: covered }),
       },
       include: {
         league: { select: { name: true, logoUrl: true } },
@@ -226,10 +234,12 @@ export class EventsService {
     const endOfDay = new Date(targetDate);
     endOfDay.setHours(23, 59, 59, 999);
 
+    const covered = await coveredLeagueFilter(this.prisma);
     const counts = await this.prisma.event.groupBy({
       by: ['sport'],
       where: {
         kickoffAt: { gte: startOfDay, lte: endOfDay },
+        ...(covered && { league: covered }),
       },
       _count: { id: true },
     });
@@ -250,9 +260,11 @@ export class EventsService {
     const endOfDay = new Date(targetDate);
     endOfDay.setHours(23, 59, 59, 999);
 
+    const covered = await coveredLeagueFilter(this.prisma);
     const leagues = await this.prisma.league.findMany({
       where: {
         sport,
+        ...covered,
         events: {
           some: {
             kickoffAt: { gte: startOfDay, lte: endOfDay },

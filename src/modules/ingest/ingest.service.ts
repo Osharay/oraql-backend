@@ -9,6 +9,7 @@ import { EventStatus, IngestJobStatus, Prisma } from '@prisma/client';
 import { FixtureData } from './interfaces/data-provider.interface';
 import { compareCoverage, isWantedCompetition } from './league-quality';
 import { TARGET_COMPETITIONS, matchesSeed } from './target-competitions';
+import { coveredLeagueFilter } from '@/common/covered-leagues';
 import {
   trackedLeagueIds,
   oddsPollingEnabled,
@@ -115,11 +116,13 @@ export class IngestService {
     const ninetyMinFromNow = new Date(now.getTime() + 90 * 60 * 1000);
 
     // Find events kicking off in the next 90 minutes that don't have confirmed lineups
+    const covered = await coveredLeagueFilter(this.prisma);
     const events = await this.prisma.event.findMany({
       where: {
         status: EventStatus.SCHEDULED,
         kickoffAt: { gte: now, lte: ninetyMinFromNow },
         lineupsConfirmedAt: null,
+        ...(covered && { league: covered }),
       },
       select: { id: true, externalId: true, kickoffAt: true },
     });
@@ -467,10 +470,14 @@ export class IngestService {
     const seasonDepth = options.seasons ?? coverageSeasons();
 
     const now = new Date();
+    // Only covered competitions: backfilling history for a league we do not
+    // list spends requests on data nothing reads.
+    const covered = await coveredLeagueFilter(this.prisma);
     const upcoming = await this.prisma.event.findMany({
       where: {
         kickoffAt: { gte: now, lte: new Date(now.getTime() + days * 86_400_000) },
         status: { in: [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED] },
+        ...(covered && { league: covered }),
       },
       select: { leagueId: true, league: { select: { externalId: true, name: true, season: true } } },
     });
@@ -913,6 +920,7 @@ export class IngestService {
    * Teams playing in the given window, as provider ids, de-duplicated.
    */
   async getTeamsNeedingStats(withinHours = 72): Promise<Array<{ id: string; externalId: string }>> {
+    const covered = await coveredLeagueFilter(this.prisma);
     const events = await this.prisma.event.findMany({
       where: {
         kickoffAt: {
@@ -920,6 +928,7 @@ export class IngestService {
           lte: new Date(Date.now() + withinHours * 60 * 60 * 1000),
         },
         status: { in: [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED] },
+        ...(covered && { league: covered }),
       },
       select: {
         homeTeam: { select: { id: true, externalId: true } },
@@ -982,6 +991,7 @@ export class IngestService {
   }
 
   async getEventsInWindow(withinHours: number) {
+    const covered = await coveredLeagueFilter(this.prisma);
     return this.prisma.event.findMany({
       where: {
         kickoffAt: {
@@ -989,6 +999,7 @@ export class IngestService {
           lte: new Date(Date.now() + withinHours * 60 * 60 * 1000),
         },
         status: { in: [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED] },
+        ...(covered && { league: covered }),
       },
       select: { id: true, externalId: true, kickoffAt: true },
       orderBy: { kickoffAt: 'asc' },
