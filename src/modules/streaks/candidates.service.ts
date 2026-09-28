@@ -801,7 +801,10 @@ export class CandidatesService {
     // card: without it the card simply says nothing about absences.
     const fixtureIds = new Set([...nextFixtures.values()].map((f) => f.eventId));
     const available = await this.availability
-      .forEvents(upcoming.filter((e) => fixtureIds.has(e.id)))
+      .forEvents(
+        (upcoming as Array<{ id: string; homeTeamId: string; awayTeamId: string; absencesCheckedAt: Date | null }>)
+          .filter((e) => fixtureIds.has(e.id)),
+      )
       .catch((error) => {
         this.logger.warn(`Availability unavailable: ${error instanceof Error ? error.message : error}`);
         return new Map();
