@@ -1,3 +1,4 @@
+import type { PlayerSeasonStat } from '../interfaces/data-provider.interface';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -133,6 +134,14 @@ export class ApiFootballAdapter implements IDataProvider {
   }
 
   private async request<T>(endpoint: string, params: Record<string, string> = {}): Promise<T> {
+    return (await this.requestBody<T>(endpoint, params)).response;
+  }
+
+  /** The whole reply, for endpoints that page. */
+  private async requestBody<T>(
+    endpoint: string,
+    params: Record<string, string> = {},
+  ): Promise<{ response: T; paging?: { current: number; total: number } }> {
     const url = new URL(`${this.baseUrl}/${endpoint}`);
     Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 
@@ -187,7 +196,7 @@ export class ApiFootballAdapter implements IDataProvider {
         this.logger.warn(`API-Football daily allowance low: ${remaining} requests remaining`);
       }
 
-      return (data as { response: T }).response;
+      return data as { response: T; paging?: { current: number; total: number } };
     }
   }
 
@@ -580,6 +589,48 @@ export class ApiFootballAdapter implements IDataProvider {
       photoUrl: p.photo,
       teamExternalId,
     }));
+  }
+
+  /**
+   * Every player's season numbers for one club: appearances, minutes, goals,
+   * assists and shots, summed over the competitions it played that season
+   * (league, cups, Europe) for THIS club only — a January signing's goals for
+   * his old side are not this team's goals.
+   *
+   * Twenty players a page; a squad is usually two pages, capped at four.
+   */
+  async getPlayerSeasonStats(teamExternalId: string, season: number): Promise<PlayerSeasonStat[]> {
+    const out: PlayerSeasonStat[] = [];
+    for (let page = 1; page <= 4; page++) {
+      const body = await this.requestBody<any[]>('players', {
+        team: teamExternalId,
+        season: String(season),
+        page: String(page),
+      });
+      for (const row of body.response ?? []) {
+        const player = row?.player;
+        if (player?.id == null) continue;
+        const stats = (row.statistics ?? []).filter(
+          (s: any) => String(s?.team?.id) === String(teamExternalId),
+        );
+        const sum = (pick: (s: any) => unknown) =>
+          stats.reduce((n: number, s: any) => n + (Number(pick(s)) || 0), 0);
+        out.push({
+          externalId: String(player.id),
+          name: player.name,
+          position: stats.find((s: any) => s?.games?.position)?.games?.position ?? undefined,
+          photoUrl: player.photo,
+          appearances: sum((s) => s?.games?.appearences),
+          minutes: sum((s) => s?.games?.minutes),
+          goals: sum((s) => s?.goals?.total),
+          assists: sum((s) => s?.goals?.assists),
+          shots: sum((s) => s?.shots?.total),
+        });
+      }
+      const total = body.paging?.total ?? 1;
+      if (page >= total) break;
+    }
+    return out;
   }
 
   async getOdds(fixtureExternalId: string): Promise<OddsData[]> {

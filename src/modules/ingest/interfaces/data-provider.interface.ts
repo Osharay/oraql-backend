@@ -81,6 +81,19 @@ export interface PlayerData {
   teamExternalId: string;
 }
 
+/** One player's season for one club, summed across its competitions. */
+export interface PlayerSeasonStat {
+  externalId: string;
+  name: string;
+  position?: string;
+  photoUrl?: string;
+  appearances: number;
+  minutes: number;
+  goals: number;
+  assists: number;
+  shots: number;
+}
+
 export interface LineupData {
   fixtureExternalId: string;
   teamExternalId: string;

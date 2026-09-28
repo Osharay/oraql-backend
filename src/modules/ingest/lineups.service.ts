@@ -123,7 +123,7 @@ export class LineupsService {
 
     await this.prisma.event.update({
       where: { id: eventId },
-      data: { lineupsConfirmedAt: new Date(), status: EventStatus.LINEUP_CONFIRMED },
+      data: { lineupsConfirmedAt: new Date(), status: EventStatus.LINEUP_CONFIRMED, absencesCheckedAt: new Date() },
     });
     this.gateway.broadcastEventStatus(eventId, EventStatus.LINEUP_CONFIRMED);
 
@@ -138,7 +138,7 @@ export class LineupsService {
    * engine never saw an absence. Replacing rather than appending keeps it to
    * who is missing now — last month's knock does not linger.
    */
-  private async recordAbsences(
+  async recordAbsences(
     fixtureExternalId: string,
     teamIdByExternal: Map<string, string>,
   ): Promise<number> {

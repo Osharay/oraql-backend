@@ -11,6 +11,7 @@ import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
 import { RatingsService } from './ratings.service';
 import { SeasonRepairService } from './season-repair.service';
+import { AvailabilityRefreshService } from '@/modules/ingest/availability-refresh.service';
 import { FormService, Venue } from './form.service';
 import { BoardService } from './board.service';
 import type { BoardSort } from './market-board';
@@ -48,6 +49,7 @@ export class StreaksController {
     private readonly profiles: ProfilesService,
     private readonly ratings: RatingsService,
     private readonly seasons: SeasonRepairService,
+    private readonly availabilityRefresh: AvailabilityRefreshService,
     private readonly form: FormService,
     private readonly board: BoardService,
     private readonly jobs: EngineJobsService,
@@ -131,6 +133,18 @@ export class StreaksController {
   repairSeasons() {
     this.jobs.assertIdle(['derive', 'baselines', 'engine']);
     return accepted(this.jobs.start('seasons', (report) => this.seasons.repair({ onProgress: report })));
+  }
+
+  @Post('availability/refresh')
+  @UseGuards(AdminGuard)
+  @ApiOperation({
+    summary: 'Pull who scores for each club playing in the next 3 days, and each fixture’s injuries and suspensions',
+  })
+  @HttpCode(202)
+  refreshAvailability() {
+    return accepted(
+      this.jobs.start('availability', (report) => this.availabilityRefresh.refresh({ onProgress: report })),
+    );
   }
 
   @Post('ratings/compute')

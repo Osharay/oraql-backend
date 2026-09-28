@@ -6,6 +6,7 @@ import { IngestProcessor } from './ingest.processor';
 import { ApiFootballAdapter } from './adapters/api-football.adapter';
 import { OddsApiAdapter } from './adapters/odds-api.adapter';
 import { LineupsService } from './lineups.service';
+import { AvailabilityRefreshService } from './availability-refresh.service';
 import { MarketsModule } from '@/modules/markets/markets.module';
 import { PicksModule } from '@/modules/picks/picks.module';
 import { EventsModule } from '@/modules/events/events.module';
@@ -24,9 +25,10 @@ import { ProbabilityModule } from '@/modules/probability/probability.module';
     IngestService,
     IngestProcessor,
     LineupsService,
+    AvailabilityRefreshService,
     ApiFootballAdapter,
     OddsApiAdapter,
   ],
-  exports: [IngestService, ApiFootballAdapter, OddsApiAdapter],
+  exports: [IngestService, ApiFootballAdapter, OddsApiAdapter, AvailabilityRefreshService],
 })
 export class IngestModule {}

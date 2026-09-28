@@ -18,6 +18,8 @@ import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
 import { currentSeasonRecord, SeasonRecord } from './season-record';
 import { bandOf, OpponentSplit, sidesFor, splitByOpponent } from './opponent-split';
 import { recentFormContext } from './recent-form';
+import { AvailabilityReader } from '@/modules/availability/availability.reader';
+import { absenceVerdict } from '@/modules/availability/availability';
 import { firstFixtureByTeam } from './next-fixture';
 import { detectLeagueChange, LeagueChange } from './league-change';
 
@@ -114,7 +116,10 @@ export class CandidatesService {
   /** Lift that earns full marks on the lift component of the score. */
   private readonly LIFT_FULL_MARKS = 0.3;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly availability: AvailabilityReader,
+  ) {}
 
   async runEngine(options?: {
     minSample?: number;
@@ -780,6 +785,9 @@ export class CandidatesService {
               id: true,
               kickoffAt: true,
               round: true,
+              homeTeamId: true,
+              awayTeamId: true,
+              absencesCheckedAt: true,
               homeTeam: { select: { id: true, name: true, rating: true, ratingTier: true } },
               awayTeam: { select: { id: true, name: true, rating: true, ratingTier: true } },
               league: { select: { name: true, country: true } },
@@ -789,6 +797,15 @@ export class CandidatesService {
         : Promise.resolve([]),
     ]);
     const nextFixtures = firstFixtureByTeam(uniqueTeamIds, upcoming);
+    // Who is missing for the fixtures the cards are about. Never fails a
+    // card: without it the card simply says nothing about absences.
+    const fixtureIds = new Set([...nextFixtures.values()].map((f) => f.eventId));
+    const available = await this.availability
+      .forEvents(upcoming.filter((e) => fixtureIds.has(e.id)))
+      .catch((error) => {
+        this.logger.warn(`Availability unavailable: ${error instanceof Error ? error.message : error}`);
+        return new Map();
+      });
 
     const byId = new Map<string, { id: string; type: string; name: string; shortName: string | null }>();
     for (const t of teams) byId.set(t.id, { id: t.id, type: 'TEAM', name: t.name, shortName: t.shortName ?? null });
@@ -820,7 +837,7 @@ export class CandidatesService {
         // market covers one club or the match.
         marketLabel: displayName ? streakMarketLabel(displayName, scope, teamName) : undefined,
         subject: marketSubjectOf(scope, teamName),
-        nextFixture: fixture,
+        nextFixture: fixture ? withAvailability(fixture, available.get(fixture.eventId), marketId) : null,
         ...(split ? { opponentSplit: { ...split, next: nextBand(fixture) } } : {}),
       };
     });
@@ -947,4 +964,27 @@ export class CandidatesService {
       }),
     );
   }
+}
+
+/**
+ * The fixture with each side's absences from the card's team's point of view,
+ * and what they mean for this market: against the pick, or for it.
+ */
+function withAvailability<F extends { isHome: boolean }>(
+  fixture: F,
+  sides: { home: unknown; away: unknown } | undefined,
+  marketId: string | undefined,
+) {
+  if (!sides) return { ...fixture, availability: null };
+  type A = Parameters<typeof absenceVerdict>[1];
+  const own = (fixture.isHome ? sides.home : sides.away) as A;
+  const opponent = (fixture.isHome ? sides.away : sides.home) as A;
+  return {
+    ...fixture,
+    availability: {
+      own,
+      opponent,
+      verdict: marketId ? absenceVerdict(marketId, own, opponent) : null,
+    },
+  };
 }

@@ -8,6 +8,8 @@ import { ClustersService } from './clusters.service';
 import { ProfilesService } from './profiles.service';
 import { RatingsService } from './ratings.service';
 import { SeasonRepairService } from './season-repair.service';
+import { AvailabilityReader } from '@/modules/availability/availability.reader';
+import { IngestModule } from '@/modules/ingest/ingest.module';
 import { FormService } from './form.service';
 import { EngineJobsService } from './engine-jobs.service';
 import { BoardService } from './board.service';
@@ -21,6 +23,7 @@ import { StreaksController } from './streaks.controller';
  * -> performance, and the settled results feed the next round of baselines.
  */
 @Module({
+  imports: [IngestModule],
   controllers: [StreaksController],
   providers: [
     ObservationsService,
@@ -32,6 +35,7 @@ import { StreaksController } from './streaks.controller';
     ProfilesService,
     RatingsService,
     SeasonRepairService,
+    AvailabilityReader,
     FormService,
     BoardService,
     EngineJobsService,

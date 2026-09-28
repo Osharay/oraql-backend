@@ -158,6 +158,8 @@ model Team {
   /// The league the tier is measured within.
   ratingLeagueId  String?
   ratedAt         DateTime?
+  /// When the squad's season numbers were last pulled.
+  playerStatsAt   DateTime?
 
   // Relations
   homeEvents      Event[]  @relation("HomeTeam")
@@ -185,6 +187,15 @@ model Player {
   teamId          String
   team            Team     @relation(fields: [teamId], references: [id])
   isActive        Boolean  @default(true)
+
+  /// Season numbers for his current club (AvailabilityRefreshService).
+  seasonGoals     Int?
+  seasonAssists   Int?
+  seasonApps      Int?
+  seasonMinutes   Int?
+  seasonShots     Int?
+  statsSeason     Int?
+  statsAt         DateTime?
 
   injuries        PlayerInjury[]
   lineupEntries   LineupEntry[]
@@ -260,6 +271,9 @@ model Event {
   /// opponent strength.
   homeRatingBefore   Float?
   awayRatingBefore   Float?
+
+  /// When this fixture's injuries and suspensions were last checked.
+  absencesCheckedAt  DateTime?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 

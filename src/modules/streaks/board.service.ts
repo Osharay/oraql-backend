@@ -5,6 +5,8 @@ import { EventStatus } from '@prisma/client';
 import { MARKET_DEFINITIONS, marketScope } from './market-definitions';
 import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
 import { FormService, type TeamMarketForm } from './form.service';
+import { AvailabilityReader } from '@/modules/availability/availability.reader';
+import { absenceVerdict, type Availability } from '@/modules/availability/availability';
 import {
   BoardSort,
   EVIDENCE_FLOOR,
@@ -42,6 +44,8 @@ export interface BoardRowOut {
   gated: boolean;
   /** Whether both sides' records lean the same way on this market. */
   agreement: Agreement | null;
+  /** Key players missing, and whether that works against this row or for it. */
+  absence: { effect: 'HURTS' | 'HELPS'; level: 'MAJOR' | 'MINOR' } | null;
 }
 
 /**
@@ -72,6 +76,7 @@ export class BoardService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly form: FormService,
+    private readonly availability: AvailabilityReader,
   ) {}
 
   async forEvent(eventId: string, options: { sort?: BoardSort; limit?: number } = {}) {
@@ -85,6 +90,7 @@ export class BoardService {
         status: true,
         homeTeamId: true,
         awayTeamId: true,
+        absencesCheckedAt: true,
         homeTeam: { select: { id: true, name: true, shortName: true } },
         awayTeam: { select: { id: true, name: true, shortName: true } },
         league: { select: { name: true, country: true } },
@@ -108,6 +114,12 @@ export class BoardService {
     const awayRows = byMarket(away.markets);
 
     const gated = await this.gatedSlices(eventId);
+
+    // Who is missing on each side. Never fails the board.
+    const sides = await this.availability
+      .forEvents([event])
+      .then((m) => m.get(event.id) ?? { home: null, away: null })
+      .catch(() => ({ home: null as Availability | null, away: null as Availability | null }));
 
     // What each side lets opponents do where it plays this fixture: the other
     // half of a team market. Northampton scoring under 1.5 away is also York
@@ -143,8 +155,8 @@ export class BoardService {
             wins: allows?.wins ?? 0,
             played: allows?.played ?? 0,
           };
-          const sides = against.played > 0 ? [own, against] : [own];
-          const combined = combineSides(sides, baseline);
+          const evidenceSides = against.played > 0 ? [own, against] : [own];
+          const combined = combineSides(evidenceSides, baseline);
           const wins = combined.wins;
           const played = combined.played;
           const probability = combined.probability;
@@ -168,9 +180,13 @@ export class BoardService {
             confidenceNote: CONFIDENCE_NOTE[confidenceOf(played)],
             recent: row?.recent ?? '',
             currentRun: row?.currentRun ?? 0,
-            evidence: sides,
+            evidence: evidenceSides,
             gated: gated.has(`${def.marketId}::${teamId}`),
             agreement: agreementOf([own, against], baseline),
+            absence:
+              side === 'HOME'
+                ? absenceVerdict(def.marketId, sides.home, sides.away)
+                : absenceVerdict(def.marketId, sides.away, sides.home),
           });
         }
         continue;
@@ -206,6 +222,7 @@ export class BoardService {
           gated.has(`${def.marketId}::${event.homeTeamId}`) ||
           gated.has(`${def.marketId}::${event.awayTeamId}`),
         agreement: agreementOf(evidence, baseline),
+        absence: absenceVerdict(def.marketId, sides.home, sides.away),
       });
     }
 
@@ -224,6 +241,7 @@ export class BoardService {
         home: { id: event.homeTeam.id, name: homeName },
         away: { id: event.awayTeam.id, name: awayName },
       },
+      availability: sides,
       sort,
       markets: rows.length,
       measured,
