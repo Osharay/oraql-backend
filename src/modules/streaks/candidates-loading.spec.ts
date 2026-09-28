@@ -22,7 +22,7 @@ function service(overrides: Record<string, any> = {}) {
     marketObservation: { findMany: jest.fn(async () => []) },
     ...overrides,
   };
-  return { svc: new CandidatesService(prisma) as any, prisma };
+  return { svc: new CandidatesService(prisma, {} as any) as any, prisma };
 }
 
 describe('teamsWithUpcomingFixtures', () => {
