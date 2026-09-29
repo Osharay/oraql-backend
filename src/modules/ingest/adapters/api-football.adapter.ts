@@ -209,6 +209,22 @@ export class ApiFootballAdapter implements IDataProvider {
     return raw.map((f) => this.mapFixture(f));
   }
 
+  /**
+   * Specific fixtures by provider id, twenty per request — how a match already
+   * held is re-read after it has been moved, postponed or rescheduled. The
+   * daily ingest reads by date, so a match moved out of its window was never
+   * seen again and kept its old date.
+   */
+  async getFixturesByIds(ids: string[]): Promise<FixtureData[]> {
+    const out: FixtureData[] = [];
+    for (let i = 0; i < ids.length; i += 20) {
+      const chunk = ids.slice(i, i + 20);
+      const raw = await this.request<any[]>('fixtures', { ids: chunk.join('-') });
+      out.push(...raw.map((f) => this.mapFixture(f)));
+    }
+    return out;
+  }
+
   /** Shared fixture mapping — the /fixtures payload shape is the same everywhere it appears. */
   private mapFixture(f: any): FixtureData {
     return {

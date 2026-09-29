@@ -755,6 +755,65 @@ export class IngestService {
   }
 
   /**
+   * Re-read every covered fixture we hold that has not been played yet, so
+   * moved and postponed matches carry their real date and status.
+   *
+   * Barnet v York sat on 3 October after it had been moved to 27 October:
+   * fixtures are ingested by date, a match that leaves the window is never
+   * read again, and an update never wrote the kickoff anyway. This reads the
+   * held fixtures by id instead — twenty per request, about a hundred
+   * requests for a fortnight of covered matches — including the last few
+   * days' unfinished ones, which are usually the postponed.
+   */
+  @Cron('40 4,12 * * *', { name: 'fixture-refresh', timeZone: 'UTC' })
+  async scheduledFixtureRefresh() {
+    try {
+      await this.refreshHeldFixtures();
+    } catch (error) {
+      this.logger.error(`Fixture refresh failed: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  async refreshHeldFixtures(options: { daysAhead?: number } = {}) {
+    const now = Date.now();
+    const covered = await coveredLeagueFilter(this.prisma);
+    const held = await this.prisma.event.findMany({
+      where: {
+        kickoffAt: {
+          gte: new Date(now - 3 * 86_400_000),
+          lte: new Date(now + (options.daysAhead ?? 14) * 86_400_000),
+        },
+        status: { in: [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED, EventStatus.POSTPONED] },
+        ...(covered && { league: covered }),
+      },
+      select: { externalId: true, kickoffAt: true, status: true },
+    });
+    if (held.length === 0) return { held: 0, updated: 0, moved: 0 };
+
+    const before = new Map(held.map((e) => [e.externalId, e]));
+    const fixtures = await this.apiFootball.getFixturesByIds(held.map((e) => e.externalId));
+
+    let moved = 0;
+    let statusChanged = 0;
+    for (const f of fixtures) {
+      const prior = before.get(f.externalId);
+      if (prior && prior.kickoffAt.getTime() !== f.kickoffAt.getTime()) {
+        moved++;
+        this.logger.log(
+          `Fixture ${f.externalId} moved: ${prior.kickoffAt.toISOString()} -> ${f.kickoffAt.toISOString()}`,
+        );
+      }
+      if (prior && prior.status !== f.status) statusChanged++;
+      await this.upsertFixture(f);
+    }
+
+    this.logger.log(
+      `Fixture refresh: ${held.length} held, ${fixtures.length} returned, ${moved} moved, ${statusChanged} changed status`,
+    );
+    return { held: held.length, updated: fixtures.length, moved, statusChanged };
+  }
+
+  /**
    * Upsert a fixture and everything it depends on (league, both teams, event).
    *
    * Names come from the fixture payload, so an existing placeholder row is
@@ -826,6 +885,11 @@ export class IngestService {
       },
       update: {
         status: fixture.status as EventStatus,
+        // A rescheduled match comes back with its new date and round; without
+        // these it kept the date it was first seen with.
+        kickoffAt: fixture.kickoffAt,
+        ...(fixture.round ? { round: fixture.round } : {}),
+        ...(fixture.venue ? { venue: fixture.venue } : {}),
         homeScore: fixture.homeScore,
         awayScore: fixture.awayScore,
         ...(fixture.league?.season != null ? { season: fixture.league.season } : {}),

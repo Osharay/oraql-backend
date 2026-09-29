@@ -12,6 +12,7 @@ import { ProfilesService } from './profiles.service';
 import { RatingsService } from './ratings.service';
 import { SeasonRepairService } from './season-repair.service';
 import { AvailabilityRefreshService } from '@/modules/ingest/availability-refresh.service';
+import { IngestService } from '@/modules/ingest/ingest.service';
 import { FormService, Venue } from './form.service';
 import { BoardService } from './board.service';
 import type { BoardSort } from './market-board';
@@ -50,6 +51,7 @@ export class StreaksController {
     private readonly ratings: RatingsService,
     private readonly seasons: SeasonRepairService,
     private readonly availabilityRefresh: AvailabilityRefreshService,
+    private readonly ingest: IngestService,
     private readonly form: FormService,
     private readonly board: BoardService,
     private readonly jobs: EngineJobsService,
@@ -133,6 +135,14 @@ export class StreaksController {
   repairSeasons() {
     this.jobs.assertIdle(['derive', 'baselines', 'engine']);
     return accepted(this.jobs.start('seasons', (report) => this.seasons.repair({ onProgress: report })));
+  }
+
+  @Post('fixtures/refresh')
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: 'Re-read every unplayed covered fixture by id, so moved and postponed matches carry their real date' })
+  @HttpCode(202)
+  refreshFixtures() {
+    return accepted(this.jobs.start('fixtures', () => this.ingest.refreshHeldFixtures()));
   }
 
   @Post('availability/refresh')
