@@ -116,6 +116,7 @@ export class PicksService {
     const topMarkets = await this.prisma.market.findMany({
       where: {
         eventId,
+        origin: 'MODEL',
         probability: { gte: this.MIN_PROBABILITY },
       },
       orderBy: { probability: 'desc' },

@@ -91,7 +91,9 @@ export class ProbabilityService {
         `Event ${eventId} skipped: only ${history} matches of history for the weaker side ` +
           `(need ${this.MIN_HISTORY_FOR_MARKETS}). No markets published.`,
       );
-      await this.prisma.market.deleteMany({ where: { eventId } });
+      // Only the model's own rows: markets added from streaks belong to
+      // someone's Bet Builder.
+      await this.prisma.market.deleteMany({ where: { eventId, origin: 'MODEL' } });
       return;
     }
 
@@ -167,7 +169,7 @@ export class ProbabilityService {
     // this match every time it was recomputed (as it now is on lineups). A
     // market is identified within its event by its name.
     const existing = await this.prisma.market.findMany({
-      where: { eventId },
+      where: { eventId, origin: 'MODEL' },
       select: { id: true, name: true },
     });
     const idByName = new Map<string, string>(existing.map((e) => [String(e.name), String(e.id)]));

@@ -396,6 +396,9 @@ model Market {
   event               Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
   category            MarketCategory
   name                String          // e.g. "Over 2.5 Goals", "BTTS Yes"
+  /// MODEL: the probability model's own (rebuilt on recompute). STREAK:
+  /// created from a streak or cluster for a Bet Builder; never removed by it.
+  origin              String          @default("MODEL")
   shortName           String?         // e.g. "O2.5", "BTTS"
   line                Float?          // e.g. 2.5 for Over 2.5
 

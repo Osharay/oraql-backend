@@ -4,6 +4,7 @@ import {
   Post,
   Delete,
   Param,
+  Body,
   UseGuards,
   ParseUUIDPipe,
   HttpCode,
@@ -13,6 +14,7 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { BuilderService } from './builder.service';
 import { JwtAuthGuard } from '@/modules/auth/guards/jwt-auth.guard';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
+import { AddStreakSelectionDto } from './dto/add-streak-selection.dto';
 
 @ApiTags('builder')
 @ApiBearerAuth()
@@ -34,6 +36,12 @@ export class BuilderController {
     @Param('marketId', ParseUUIDPipe) marketId: string,
   ) {
     return this.builderService.addSelection(userId, marketId);
+  }
+
+  @Post('add-streak')
+  @ApiOperation({ summary: 'Add a streak or cluster selection to the Bet Builder' })
+  async addStreakSelection(@CurrentUser('sub') userId: string, @Body() body: AddStreakSelectionDto) {
+    return this.builderService.addStreakSelection(userId, body);
   }
 
   @Delete('remove/:marketId')

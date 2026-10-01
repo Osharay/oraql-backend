@@ -8,6 +8,9 @@ import { PrismaService } from '@/common/prisma/prisma.service';
 import { describeMarket } from '@/common/market-copy';
 import { EventStatus } from '@prisma/client';
 import { combinedChance, conflictBetween } from './builder-math';
+import { legProbability, legSide, modelMarketName } from './streak-leg';
+import { MARKET_DEFINITIONS, marketScope } from '@/modules/streaks/market-definitions';
+import { streakMarketLabel } from '@/common/market-copy';
 
 /** Statuses a selection can still be added for: the match has not started. */
 const OPEN_STATUSES: EventStatus[] = [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED];
@@ -64,6 +67,84 @@ export class BuilderService {
       combinedRange: { low: chance.low, high: chance.high },
       sharedMatches: chance.sharedMatches,
     };
+  }
+
+  /**
+   * Add a streak or cluster selection to the Bet Builder.
+   *
+   * Uses the model's own market for the fixture when it publishes one, so the
+   * builder's conflict checks and the model's chance apply; otherwise creates
+   * a market row from the streak (origin STREAK, which recomputes leave
+   * alone), carrying the streak's chance. Then adds it like any market.
+   */
+  async addStreakSelection(
+    userId: string,
+    input: { eventId: string; marketId: string; teamId?: string | null; probability?: number },
+  ) {
+    const def = MARKET_DEFINITIONS.find((d) => d.marketId === input.marketId);
+    if (!def) throw new BadRequestException(`Unknown market ${input.marketId}`);
+
+    const event = await this.prisma.event.findUnique({
+      where: { id: input.eventId },
+      select: {
+        id: true,
+        homeTeamId: true,
+        awayTeamId: true,
+        homeTeam: { select: { name: true, shortName: true } },
+        awayTeam: { select: { name: true, shortName: true } },
+      },
+    });
+    if (!event) throw new NotFoundException('That match is no longer listed');
+
+    const scope = marketScope(def.marketId);
+    const side = legSide(scope, input.teamId, event);
+    if (!side) throw new BadRequestException('That team is not playing in this match');
+
+    // The model names markets with short names where it has them.
+    const short = {
+      home: event.homeTeam.shortName || event.homeTeam.name,
+      away: event.awayTeam.shortName || event.awayTeam.name,
+    };
+    const modelName = modelMarketName(def.marketId, side, short);
+    if (modelName) {
+      const model = await this.prisma.market.findFirst({
+        where: { eventId: event.id, name: modelName, origin: 'MODEL' },
+        select: { id: true },
+      });
+      if (model) return this.addSelection(userId, model.id);
+    }
+
+    const teamName = side === 'HOME' ? event.homeTeam.name : side === 'AWAY' ? event.awayTeam.name : null;
+    // The model's naming where there is one, so conflict checks still work.
+    const name = modelName ?? streakMarketLabel(def.displayName, scope, teamName);
+    const probability = legProbability(input.probability ?? 0.5);
+
+    const existing = await this.prisma.market.findFirst({
+      where: { eventId: event.id, name, origin: 'STREAK' },
+      select: { id: true },
+    });
+    const market = existing
+      ? await this.prisma.market.update({
+          where: { id: existing.id },
+          data: { probability, probabilityUpdatedAt: new Date() },
+          select: { id: true },
+        })
+      : await this.prisma.market.create({
+          data: {
+            eventId: event.id,
+            origin: 'STREAK',
+            category: def.category,
+            name,
+            shortName: def.shortName ?? null,
+            line: def.line ?? null,
+            probability,
+            confidence: 0.5,
+            explanation: 'Added from a streak: the chance is the team record behind it, not the match model.',
+          },
+          select: { id: true },
+        });
+
+    return this.addSelection(userId, market.id);
   }
 
   /**
