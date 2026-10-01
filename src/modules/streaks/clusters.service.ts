@@ -194,10 +194,12 @@ export class ClustersService {
                 result: { select: { result: true } },
                 event: {
                   select: {
+                    // Enough for a row to open into the match it is about.
+                    id: true,
                     kickoffAt: true,
-                    homeTeam: { select: { name: true, shortName: true } },
-                    awayTeam: { select: { name: true, shortName: true } },
-                    league: { select: { name: true } },
+                    homeTeam: { select: { id: true, name: true, shortName: true } },
+                    awayTeam: { select: { id: true, name: true, shortName: true } },
+                    league: { select: { name: true, country: true } },
                   },
                 },
                 streakCandidate: {
@@ -205,6 +207,9 @@ export class ClustersService {
                     selection: true,
                     entityType: true,
                     entityId: true,
+                    wins: true,
+                    last10: true,
+                    context: true,
                     marketDefinition: {
                       select: { marketId: true, displayName: true, shortName: true },
                     },
