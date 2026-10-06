@@ -8,7 +8,7 @@ import { clusterOutcome, driverOf, hitRate, hitRateBy } from './results-summary'
 export type ResultsType = 'picks' | 'streaks' | 'clusters';
 export type ResultsScope = 'all' | 'club' | 'international';
 
-interface MatchHead {
+export interface MatchHead {
   eventId: string;
   kickoffAt: Date;
   home: string;
