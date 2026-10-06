@@ -6,6 +6,7 @@
  */
 
 import { compareSides } from './elo';
+import { isInternationalCompetition } from '@/common/international';
 
 export type CompetitionKind = 'LEAGUE' | 'CUP';
 
@@ -31,7 +32,14 @@ export interface NextFixture {
   home: { id: string; name: string };
   away: { id: string; name: string };
   isHome: boolean;
-  competition: { name: string; country: string | null; kind: CompetitionKind; round: string | null };
+  competition: {
+    name: string;
+    country: string | null;
+    kind: CompetitionKind;
+    round: string | null;
+    /** National teams: a record means less (few matches, changing squads). */
+    international: boolean;
+  };
   /** Who is stronger going in, from the team ratings. Null until both are rated. */
   strength: {
     home: { rating: number; tier: string | null };
@@ -82,6 +90,7 @@ export function firstFixtureByTeam(
           country: e.league.country,
           kind: competitionKind(e.league.name, e.round),
           round: e.round,
+          international: isInternationalCompetition(e.league.name, e.league.country),
         },
         strength: strengthOf(e.homeTeam, e.awayTeam),
       });

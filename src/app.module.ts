@@ -25,6 +25,7 @@ import { IngestModule } from '@/modules/ingest/ingest.module';
 import { StreaksModule } from '@/modules/streaks/streaks.module';
 import { ProbabilityModule } from '@/modules/probability/probability.module';
 import { StorageModule } from '@/modules/storage/storage.module';
+import { ResultsModule } from '@/modules/results/results.module';
 
 @Module({
   imports: [
@@ -85,6 +86,7 @@ import { StorageModule } from '@/modules/storage/storage.module';
     StreaksModule,
     ProbabilityModule,
     StorageModule,
+    ResultsModule,
   ],
 })
 export class AppModule {}

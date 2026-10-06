@@ -1,7 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
+import { settlePick } from './pick-settlement';
 import { PrismaService } from '@/common/prisma/prisma.service';
 import { coveredLeagueFilter } from '@/common/covered-leagues';
-import { Sport } from '@prisma/client';
+import { EventStatus, ObservationResult, Sport } from '@prisma/client';
 import { toFiniteNumber } from '@/common/utils/coerce';
 
 @Injectable()
@@ -16,6 +18,101 @@ export class PicksService {
   private readonly MAX_PICKS_PER_EVENT = 5;
 
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Settle the picks of finished matches, every half hour.
+   *
+   * Each pick is copied with its result into pick_results, so the Results page
+   * keeps a record however the picks are regenerated later. Corners and cards
+   * wait for statistics; after three days without them they are recorded as
+   * unknown rather than retried for ever.
+   */
+  @Cron('10,40 * * * *', { name: 'picks-settlement', timeZone: 'UTC' })
+  async scheduledSettlement() {
+    try {
+      await this.settleFinished();
+    } catch (error) {
+      this.logger.error(`Pick settlement failed: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  async settleFinished(days = 14) {
+    const now = Date.now();
+    const events = await this.prisma.event.findMany({
+      where: {
+        status: EventStatus.FINISHED,
+        kickoffAt: { gte: new Date(now - days * 86_400_000) },
+        picks: { some: { isActive: true } },
+      },
+      select: {
+        id: true,
+        kickoffAt: true,
+        homeTeamId: true,
+        awayTeamId: true,
+        ftHomeScore: true,
+        ftAwayScore: true,
+        homeScore: true,
+        awayScore: true,
+        homeTeam: { select: { name: true, shortName: true } },
+        awayTeam: { select: { name: true, shortName: true } },
+        matchStats: { select: { teamId: true, corners: true, yellowCards: true, redCards: true } },
+        picks: {
+          where: { isActive: true },
+          select: { rank: true, probability: true, market: { select: { name: true, category: true } } },
+        },
+        pickResults: { select: { marketName: true } },
+      },
+      take: 2000,
+    });
+
+    let settled = 0;
+    let waiting = 0;
+    for (const e of events) {
+      const done = new Set(e.pickResults.map((r) => r.marketName));
+      const home = e.matchStats.find((m) => m.teamId === e.homeTeamId);
+      const away = e.matchStats.find((m) => m.teamId === e.awayTeamId);
+      const score = {
+        homeGoals: e.ftHomeScore ?? e.homeScore,
+        awayGoals: e.ftAwayScore ?? e.awayScore,
+        homeCorners: home?.corners ?? null,
+        awayCorners: away?.corners ?? null,
+        homeCards: home ? home.yellowCards + home.redCards : null,
+        awayCards: away ? away.yellowCards + away.redCards : null,
+      };
+      // The model names markets with short names where it has them.
+      const teams = {
+        home: e.homeTeam.shortName || e.homeTeam.name,
+        away: e.awayTeam.shortName || e.awayTeam.name,
+      };
+      const stale = now - e.kickoffAt.getTime() > 3 * 86_400_000;
+
+      for (const p of e.picks) {
+        if (done.has(p.market.name)) continue;
+        const result = settlePick(p.market.name, score, teams);
+        if (result === 'UNKNOWN' && !stale) {
+          waiting++;
+          continue;
+        }
+        await this.prisma.pickResult.upsert({
+          where: { eventId_marketName: { eventId: e.id, marketName: p.market.name } },
+          create: {
+            eventId: e.id,
+            marketName: p.market.name,
+            category: String(p.market.category),
+            rank: p.rank,
+            probability: p.probability,
+            kickoffAt: e.kickoffAt,
+            result: result as ObservationResult,
+          },
+          update: { result: result as ObservationResult, settledAt: new Date() },
+        });
+        settled++;
+      }
+    }
+
+    if (settled) this.logger.log(`Picks settled: ${settled} (${waiting} waiting for statistics)`);
+    return { settled, waiting };
+  }
 
   /**
    * Get Oracle Picks for a single event.

@@ -257,6 +257,7 @@ model Event {
   odds            BookmakerOdds[]
   observations    MarketObservation[]
   streakSnapshots StreakSnapshot[]
+  pickResults     PickResult[]
 
   // Timestamps
   lineupsConfirmedAt DateTime?
@@ -843,4 +844,23 @@ model ClusterComponent {
 
   @@unique([clusterId, snapshotId])
   @@map("cluster_components")
+}
+
+/// How each OraQL pick settled, copied from the pick at kickoff so the record
+/// survives picks being regenerated. Written by PicksService.settleFinished.
+model PickResult {
+  id          String            @id @default(uuid())
+  eventId     String
+  event       Event             @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  marketName  String
+  category    String
+  rank        Int
+  probability Float
+  kickoffAt   DateTime
+  result      ObservationResult
+  settledAt   DateTime          @default(now())
+
+  @@unique([eventId, marketName])
+  @@index([kickoffAt])
+  @@map("pick_results")
 }
