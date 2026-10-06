@@ -58,7 +58,7 @@ export class PicksService {
         matchStats: { select: { teamId: true, corners: true, yellowCards: true, redCards: true } },
         picks: {
           where: { isActive: true },
-          select: { rank: true, probability: true, market: { select: { name: true, category: true } } },
+          select: { rank: true, probability: true, computedAt: true, market: { select: { name: true, category: true } } },
         },
         pickResults: { select: { marketName: true } },
       },
@@ -102,6 +102,7 @@ export class PicksService {
             rank: p.rank,
             probability: p.probability,
             kickoffAt: e.kickoffAt,
+            pickedAt: p.computedAt,
             result: result as ObservationResult,
           },
           update: { result: result as ObservationResult, settledAt: new Date() },

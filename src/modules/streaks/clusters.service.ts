@@ -9,6 +9,7 @@ import {
 } from './cluster-selection';
 import { marketScope } from './market-definitions';
 import { tierOf, type ClusterType } from './cluster-tiers';
+import { betKey } from './bet-key';
 import { streakMarketLabel, marketSubjectOf } from '@/common/market-copy';
 
 /**
@@ -32,7 +33,7 @@ interface SnapshotRow {
   lift: number;
   strengthScore: number;
   event: { leagueId: string };
-  streakCandidate: { marketDefinitionId: string; survivedGate: boolean };
+  streakCandidate: { marketDefinitionId: string; survivedGate: boolean; selection: string | null; entityId: string };
 }
 
 /** What a cluster's type means to the reader. */
@@ -70,8 +71,12 @@ export class ClustersService {
     const end = new Date(day);
     end.setHours(23, 59, 59, 999);
 
-    const snapshots = await this.prisma.streakSnapshot.findMany({
-      where: { kickoffAt: { gte: start, lte: end }, result: null },
+    // Only matches still to kick off: a cluster is a pre-match call, and one
+    // built after a leg has started could be built from hindsight.
+    const now = new Date();
+    const fromTime = now > start ? now : start;
+    const found = await this.prisma.streakSnapshot.findMany({
+      where: { kickoffAt: { gt: fromTime, lte: end }, result: null },
       select: {
         id: true,
         hitRate: true,
@@ -79,20 +84,38 @@ export class ClustersService {
         strengthScore: true,
         eventId: true,
         event: { select: { leagueId: true } },
-        streakCandidate: { select: { marketDefinitionId: true, survivedGate: true } },
+        streakCandidate: {
+          select: { marketDefinitionId: true, survivedGate: true, selection: true, entityId: true },
+        },
       },
       orderBy: [{ strengthScore: 'desc' }, { lift: 'desc' }],
     });
 
+    // The same bet can be captured more than once (one row per engine run, or
+    // from both teams of a fixture market). Keep the strongest of each, or a
+    // day's clusters come out as the same two selections three times over.
+    const bets = new Set<string>();
+    const snapshots = found.filter((s) => {
+      const k = betKey({ eventId: s.eventId, ...s.streakCandidate });
+      if (bets.has(k)) return false;
+      bets.add(k);
+      return true;
+    });
+
+    // A rebuild replaces only clusters none of whose matches have started.
+    // One already under way is on the record, win or lose, and stays as it was.
+    const existing = await this.prisma.cluster.findMany({
+      where: { date: { gte: start, lte: end } },
+      select: { id: true, components: { select: { snapshot: { select: { kickoffAt: true } } } } },
+    });
+    const locked = existing.filter((c) => c.components.some((k) => k.snapshot.kickoffAt <= now));
+    const replaceable = existing.filter((c) => !locked.includes(c)).map((c) => c.id);
+
     if (snapshots.length === 0) {
-      return { created: 0, note: 'No snapshots available for this date' };
+      return { created: 0, note: locked.length ? 'Clusters for this date have already started' : 'No snapshots available for this date' };
     }
 
-    // Clear any clusters previously built for this day so a rebuild replaces
-    // rather than accumulates.
-    await this.prisma.cluster.deleteMany({
-      where: { date: { gte: start, lte: end } },
-    });
+    if (replaceable.length) await this.prisma.cluster.deleteMany({ where: { id: { in: replaceable } } });
 
     const used = new Set<string>();
     const clusters: Array<{ components: Selectable[]; type: ClusterType }> = [];
@@ -125,8 +148,9 @@ export class ClustersService {
 
     // Evidence first. Suggestive clusters only fill the space the gated ones
     // left, so a day with real findings never shows a weaker one above them.
-    fill(gated, 'DAILY_STRONGEST', count);
-    if (includeSuggestive) fill(suggestive, 'DAILY_SUGGESTIVE', count - clusters.length);
+    const room = Math.max(count - locked.length, 0);
+    fill(gated, 'DAILY_STRONGEST', room);
+    if (includeSuggestive) fill(suggestive, 'DAILY_SUGGESTIVE', room - clusters.length);
 
     let created = 0;
 

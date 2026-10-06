@@ -857,6 +857,8 @@ model PickResult {
   rank        Int
   probability Float
   kickoffAt   DateTime
+  /// When the pick was made. Only picks made before kickoff count on the record.
+  pickedAt    DateTime?
   result      ObservationResult
   settledAt   DateTime          @default(now())
 

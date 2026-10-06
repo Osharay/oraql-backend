@@ -56,3 +56,22 @@ export function clusterOutcome(results: Array<string | null | undefined>): 'WIN'
   if (results.every((r) => r === 'VOID')) return 'VOID';
   return 'WIN';
 }
+
+/** The first item for each key, in order: one row per bet, the earliest kept. */
+export function firstOfEach<T>(items: T[], key: (i: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter((i) => {
+    const k = key(i);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+/**
+ * Whether a call counts on the record: it must have been made before the
+ * match started. A call with no time on it cannot show that, so it does not.
+ */
+export function publishedBeforeKickoff(madeAt: Date | null | undefined, kickoffAt: Date): boolean {
+  return madeAt != null && madeAt.getTime() < kickoffAt.getTime();
+}

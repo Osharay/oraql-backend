@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { betKey } from './bet-key';
 import { PrismaService } from '@/common/prisma/prisma.service';
 import {
   EventStatus,
@@ -145,6 +146,7 @@ export class SnapshotsService {
     });
 
     const rows: Prisma.StreakSnapshotCreateManyInput[] = [];
+    const rowKeys: string[] = [];
     let skippedPastCutoff = 0;
 
     for (const event of events) {
@@ -181,6 +183,7 @@ export class SnapshotsService {
           seenMatchMarkets.add(c.marketDefinitionId);
         }
 
+        rowKeys.push(betKey({ eventId: event.id, marketDefinitionId: c.marketDefinitionId, selection: c.selection, entityId: c.entityId }));
         rows.push({
           streakCandidateId: c.id,
           eventId: event.id,
@@ -200,13 +203,22 @@ export class SnapshotsService {
       return { captured: 0, displayed: 0, skippedPastCutoff, note: 'Nothing to capture' };
     }
 
-    // Skip candidate/event pairs already captured.
+    // Skip bets already captured for the match — by an earlier run (each run
+    // has its own candidate rows) or from the other team's side of a fixture
+    // market. The first capture is the one that stands on the record.
     const existing = await this.prisma.streakSnapshot.findMany({
       where: { eventId: { in: [...new Set(rows.map((r) => r.eventId))] } },
-      select: { streakCandidateId: true, eventId: true },
+      select: {
+        eventId: true,
+        streakCandidate: { select: { marketDefinitionId: true, selection: true, entityId: true } },
+      },
     });
-    const seen = new Set(existing.map((e) => `${e.streakCandidateId}::${e.eventId}`));
-    const fresh = rows.filter((r) => !seen.has(`${r.streakCandidateId}::${r.eventId}`));
+    const seen = new Set(existing.map((e) => betKey({ eventId: e.eventId, ...e.streakCandidate })));
+    const fresh = rows.filter((_, i) => {
+      if (seen.has(rowKeys[i])) return false;
+      seen.add(rowKeys[i]);
+      return true;
+    });
 
     if (fresh.length === 0) {
       return { captured: 0, displayed: 0, skippedPastCutoff, note: 'Already captured' };
