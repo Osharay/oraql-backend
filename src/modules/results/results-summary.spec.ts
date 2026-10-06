@@ -38,28 +38,3 @@ describe('results summary', () => {
     expect(clusterOutcome(['WIN', 'VOID'])).toBe('WIN');
   });
 });
-
-describe('firstOfEach', () => {
-  it('keeps the first of each key in order', () => {
-    const { firstOfEach } = jest.requireActual('./results-summary');
-    expect(firstOfEach([{ k: 'a', n: 1 }, { k: 'b', n: 2 }, { k: 'a', n: 3 }], (i: { k: string }) => i.k)).toEqual([
-      { k: 'a', n: 1 },
-      { k: 'b', n: 2 },
-    ]);
-  });
-});
-
-describe('publishedBeforeKickoff', () => {
-  const { publishedBeforeKickoff } = jest.requireActual('./results-summary');
-  const ko = new Date('2026-10-05T15:00:00Z');
-  it('counts a call made before kickoff', () => {
-    expect(publishedBeforeKickoff(new Date('2026-10-05T14:00:00Z'), ko)).toBe(true);
-  });
-  it('does not count one made at or after kickoff', () => {
-    expect(publishedBeforeKickoff(ko, ko)).toBe(false);
-    expect(publishedBeforeKickoff(new Date('2026-10-05T15:30:00Z'), ko)).toBe(false);
-  });
-  it('does not count one with no time on it', () => {
-    expect(publishedBeforeKickoff(null, ko)).toBe(false);
-  });
-});

@@ -26,6 +26,7 @@ import { StreaksModule } from '@/modules/streaks/streaks.module';
 import { ProbabilityModule } from '@/modules/probability/probability.module';
 import { StorageModule } from '@/modules/storage/storage.module';
 import { ResultsModule } from '@/modules/results/results.module';
+import { RecordModule } from '@/modules/record/record.module';
 
 @Module({
   imports: [
@@ -87,6 +88,7 @@ import { ResultsModule } from '@/modules/results/results.module';
     ProbabilityModule,
     StorageModule,
     ResultsModule,
+    RecordModule,
   ],
 })
 export class AppModule {}
