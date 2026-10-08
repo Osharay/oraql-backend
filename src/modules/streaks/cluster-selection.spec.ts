@@ -141,3 +141,33 @@ describe('combinedProbability', () => {
     expect(combinedProbability(components)).toBeLessThanOrEqual(0.6);
   });
 });
+
+describe('the cluster bar', () => {
+  const { isClusterExcludedMarket, meetsClusterBar, trimToBar } = jest.requireActual('./cluster-selection');
+  const leg = (id: string, hitRate: number) => ({ id, hitRate });
+
+  it('keeps half-time and combination markets out', () => {
+    expect(isClusterExcludedMarket('HTFT_TEAM_TEAM')).toBe(true); // leads at half-time and wins
+    expect(isClusterExcludedMarket('HT_TEAM_WIN')).toBe(true);
+    expect(isClusterExcludedMarket('TEAM_SCORE_BOTH_HALVES')).toBe(true);
+    expect(isClusterExcludedMarket('TEAM_WIN_AND_BTTS')).toBe(true);
+    expect(isClusterExcludedMarket('TEAM_UNDER_1_5')).toBe(false);
+    expect(isClusterExcludedMarket('DOUBLE_CHANCE_TEAM_OR_DRAW')).toBe(false);
+  });
+
+  it('needs 60% and keeps emerging runs out unless they passed the test', () => {
+    const base = { marketId: 'TEAM_UNDER_1_5', emerging: false, survivedGate: true };
+    expect(meetsClusterBar({ ...base, chance: 0.61 }, 0.6)).toBe(true);
+    expect(meetsClusterBar({ ...base, chance: 0.18 }, 0.6)).toBe(false);
+    expect(meetsClusterBar({ ...base, chance: 0.7, emerging: true, survivedGate: false }, 0.6)).toBe(false);
+  });
+
+  it('drops the least likely selection until the cluster reaches 20%', () => {
+    // 0.7 × 0.65 × 0.6 = 27% — fine as it is.
+    expect(trimToBar([leg('a', 0.7), leg('b', 0.65), leg('c', 0.6)], 0.2)?.map((l: { id: string }) => l.id)).toEqual(['a', 'b', 'c']);
+    // 0.5 × 0.45 × 0.4 = 9%; the best two make 22.5%.
+    expect(trimToBar([leg('a', 0.5), leg('b', 0.45), leg('c', 0.4)], 0.2)?.map((l: { id: string }) => l.id)).toEqual(['a', 'b']);
+    // Nothing reaches 20%: no cluster rather than a long shot.
+    expect(trimToBar([leg('a', 0.4), leg('b', 0.4)], 0.2)).toBeNull();
+  });
+});

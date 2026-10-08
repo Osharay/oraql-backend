@@ -3,10 +3,13 @@ import { PrismaService } from '@/common/prisma/prisma.service';
 import { ObservationResult, StreakStatus } from '@prisma/client';
 import {
   combinedProbability,
+  meetsClusterBar,
   pickDiverseComponents,
+  trimToBar,
   MIN_CLUSTER_SIZE,
   type Selectable,
 } from './cluster-selection';
+import { engineSettings } from './engine-settings';
 import { marketScope } from './market-definitions';
 import { tierOf, type ClusterType } from './cluster-tiers';
 import { betKey } from './bet-key';
@@ -33,7 +36,14 @@ interface SnapshotRow {
   lift: number;
   strengthScore: number;
   event: { leagueId: string };
-  streakCandidate: { marketDefinitionId: string; survivedGate: boolean; selection: string | null; entityId: string };
+  streakCandidate: {
+    marketDefinitionId: string;
+    survivedGate: boolean;
+    selection: string | null;
+    entityId: string;
+    context: unknown;
+    marketDefinition: { marketId: string };
+  };
 }
 
 /** What a cluster's type means to the reader. */
@@ -60,7 +70,9 @@ export class ClustersService {
     requireDistinctLeague?: boolean;
     includeSuggestive?: boolean;
   }) {
-    const size = Math.min(options?.size ?? this.DEFAULT_SIZE, this.MAX_SIZE);
+    const settings = engineSettings();
+    const bar = settings.clusterBar;
+    const size = Math.min(options?.size ?? (bar ? settings.clusterSize : this.DEFAULT_SIZE), this.MAX_SIZE);
     const count = options?.count ?? 3;
     const requireDistinctLeague = options?.requireDistinctLeague ?? false;
     const includeSuggestive = options?.includeSuggestive ?? true;
@@ -85,7 +97,14 @@ export class ClustersService {
         eventId: true,
         event: { select: { leagueId: true } },
         streakCandidate: {
-          select: { marketDefinitionId: true, survivedGate: true, selection: true, entityId: true },
+          select: {
+            marketDefinitionId: true,
+            survivedGate: true,
+            selection: true,
+            entityId: true,
+            context: true,
+            marketDefinition: { select: { marketId: true } },
+          },
         },
       },
       orderBy: [{ strengthScore: 'desc' }, { lift: 'desc' }],
@@ -123,24 +142,41 @@ export class ClustersService {
     // Flatten to the shape the selection rules work on. A suggestive snapshot
     // has no strength score (that is only awarded past the gate), so it is
     // ranked on lift instead — and never mixed into a gated cluster.
+    // With the bar on, `hitRate` carries the honest chance and picks are ranked
+    // on it first: a cluster is meant to land, so the likeliest strong picks
+    // lead, not the most unusual ones.
+    const chanceOf = (s: SnapshotRow) => (s.streakCandidate.context as { chance?: number } | null)?.chance ?? s.hitRate;
     const flatten = (rows: SnapshotRow[]): Selectable[] =>
       rows.map((s) => ({
         id: s.id,
         eventId: s.eventId,
         leagueId: s.event.leagueId,
         marketDefinitionId: s.streakCandidate.marketDefinitionId,
-        hitRate: s.hitRate,
-        strengthScore: s.strengthScore || s.lift,
+        hitRate: bar ? chanceOf(s) : s.hitRate,
+        strengthScore: bar ? chanceOf(s) + (s.strengthScore || s.lift) / 1000 : s.strengthScore || s.lift,
       }));
 
-    const rows: SnapshotRow[] = snapshots;
+    const rows: SnapshotRow[] = bar
+      ? snapshots.filter((s) =>
+          meetsClusterBar(
+            {
+              chance: chanceOf(s),
+              marketId: s.streakCandidate.marketDefinition.marketId,
+              emerging: (s.streakCandidate.context as { emerging?: boolean } | null)?.emerging === true,
+              survivedGate: s.streakCandidate.survivedGate,
+            },
+            settings.clusterMinLeg,
+          ),
+        )
+      : snapshots;
     const gated = flatten(rows.filter((s) => s.streakCandidate.survivedGate));
     const suggestive = flatten(rows.filter((s) => !s.streakCandidate.survivedGate));
 
     const fill = (pool: Selectable[], type: ClusterType, want: number) => {
       for (let i = 0; i < want; i++) {
-        const picked = pickDiverseComponents(pool, { size, requireDistinctLeague, used });
-        if (picked.length < MIN_CLUSTER_SIZE) break;
+        const found = pickDiverseComponents(pool, { size, requireDistinctLeague, used });
+        const picked = bar ? trimToBar(found, settings.clusterMinCombined) : found;
+        if (!picked || picked.length < MIN_CLUSTER_SIZE) break;
         picked.forEach((p) => used.add(p.id));
         clusters.push({ components: picked, type });
       }
@@ -190,7 +226,9 @@ export class ClustersService {
       suggestive: suggested,
       snapshotsConsidered: snapshots.length,
       note:
-        created === 0
+        bar && created < room
+          ? `${created === 0 ? 'No' : `Only ${created}`} cluster${created === 1 ? '' : 's'} cleared the bar today: every selection at least ${Math.round(settings.clusterMinLeg * 100)}% and the whole cluster at least ${Math.round(settings.clusterMinCombined * 100)}%.`
+          : created === 0
           ? 'Not enough diverse snapshots to form a cluster — each component must come from a different event and a different market.'
           : suggested > 0 && strongest === 0
             ? 'Nothing cleared the gate today, so these are suggestive: strong recent form that has not been shown to be more than luck. Combined probability assumes independence and is an approximation.'

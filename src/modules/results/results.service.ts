@@ -3,6 +3,11 @@ import { PrismaService } from '@/common/prisma/prisma.service';
 import { isInternationalCompetition } from '@/common/international';
 import { streakMarketLabel } from '@/common/market-copy';
 import { marketScope } from '@/modules/streaks/market-definitions';
+import { shownChance } from '@/modules/streaks/recent-form';
+import { betKey } from '@/modules/streaks/bet-key';
+import { dropContradictions } from '@/modules/streaks/contradictions';
+import { engineSettings } from '@/modules/streaks/engine-settings';
+import { firstOfEach } from '@/modules/record/first-of-each';
 import { clusterOutcome, driverOf, hitRate, hitRateBy } from './results-summary';
 
 export type ResultsType = 'picks' | 'streaks' | 'clusters';
@@ -119,10 +124,12 @@ export class ResultsService {
   }
 
   private async streaks(since: Date, now: Date, scope: ResultsScope) {
-    const rows = await this.prisma.streakSnapshot.findMany({
+    const found = await this.prisma.streakSnapshot.findMany({
       where: { kickoffAt: { gte: since, lt: now }, result: { isNot: null } },
-      orderBy: { kickoffAt: 'desc' },
+      // Earliest capture first, so counting once keeps what was shown first.
+      orderBy: [{ kickoffAt: 'desc' }, { capturedAt: 'asc' }],
       select: {
+        eventId: true,
         hitRate: true,
         result: { select: { result: true } },
         event: { select: this.eventSelect },
@@ -132,6 +139,8 @@ export class ResultsService {
             context: true,
             entityType: true,
             entityId: true,
+            selection: true,
+            marketDefinitionId: true,
             marketDefinition: { select: { marketId: true, displayName: true } },
           },
         },
@@ -139,23 +148,40 @@ export class ResultsService {
       take: 3000,
     });
 
-    const teamIds = [...new Set(rows.filter((r) => r.streakCandidate.entityType === 'TEAM').map((r) => r.streakCandidate.entityId))];
+    // The same bet could be captured more than once (one copy per engine run,
+    // or one per team on a fixture market) before 7 Oct; count it once.
+    const rows = engineSettings().countOnce
+      ? firstOfEach(found, (r) => betKey({ eventId: r.eventId, ...r.streakCandidate }))
+      : found;
+    const shown = engineSettings().hideContradictions
+      ? dropContradictions(
+          rows,
+          (r) => r.eventId,
+          (r) => ({
+            marketId: r.streakCandidate.marketDefinition.marketId,
+            team: marketScope(r.streakCandidate.marketDefinition.marketId) === 'TEAM' ? r.streakCandidate.entityId : null,
+          }),
+          (r) => shownChance(r.streakCandidate.context, r.hitRate),
+        )
+      : rows;
+
+    const teamIds = [...new Set(shown.filter((r) => r.streakCandidate.entityType === 'TEAM').map((r) => r.streakCandidate.entityId))];
     const teams = teamIds.length
       ? await this.prisma.team.findMany({ where: { id: { in: teamIds } }, select: { id: true, name: true } })
       : [];
     const teamName = new Map(teams.map((t) => [t.id, t.name]));
 
-    const items = rows
+    const items = shown
       .map((r) => {
         const sc = r.streakCandidate;
-        const ctx = (sc.context ?? {}) as { emerging?: boolean; formRate?: number };
+        const ctx = (sc.context ?? {}) as { emerging?: boolean };
         const tier = sc.survivedGate ? 'evidence' : ctx.emerging ? 'emerging' : 'exploratory';
         const name = sc.entityType === 'TEAM' ? teamName.get(sc.entityId) ?? null : null;
         return {
           match: this.head(r.event),
           label: streakMarketLabel(sc.marketDefinition.displayName, marketScope(sc.marketDefinition.marketId), name),
           result: String(r.result?.result ?? 'UNKNOWN'),
-          probability: typeof ctx.formRate === 'number' ? ctx.formRate : r.hitRate,
+          probability: shownChance(sc.context, r.hitRate),
           tier,
           driver: driverOf(sc.context, r.hitRate),
         };
@@ -194,6 +220,7 @@ export class ResultsService {
           select: {
             snapshot: {
               select: {
+                eventId: true,
                 kickoffAt: true,
                 hitRate: true,
                 result: { select: { result: true } },
@@ -202,6 +229,9 @@ export class ResultsService {
                   select: {
                     entityType: true,
                     entityId: true,
+                    selection: true,
+                    marketDefinitionId: true,
+                    context: true,
                     marketDefinition: { select: { marketId: true, displayName: true } },
                   },
                 },
@@ -222,7 +252,7 @@ export class ResultsService {
       : [];
     const teamName = new Map(teams.map((t) => [t.id, t.name]));
 
-    const clusters = rows
+    const built = rows
       .map((c) => {
         const legs = c.components.map((k) => {
           const s = k.snapshot;
@@ -232,7 +262,10 @@ export class ResultsService {
             match: this.head(s.event),
             label: streakMarketLabel(sc.marketDefinition.displayName, marketScope(sc.marketDefinition.marketId), name),
             result: s.result?.result ? String(s.result.result) : null,
-            probability: s.hitRate,
+            // The honest chance where the cluster was built with one; older
+            // clusters were built on the raw record and keep showing it.
+            probability: (sc.context as { chance?: number } | null)?.chance ?? s.hitRate,
+            key: betKey({ eventId: s.eventId, ...sc }),
           };
         });
         return {
@@ -243,12 +276,17 @@ export class ResultsService {
           outcome: clusterOutcome(legs.map((l) => l.result)),
           international: legs.some((l) => l.match.international),
           lastKickoff: legs.reduce((t, l) => Math.max(t, l.match.kickoffAt.getTime()), 0),
-          legs,
+          signature: legs.map((l) => l.key).sort().join(' + '),
+          legs: legs.map(({ key: _key, ...l }) => l),
         };
       })
       // Only clusters whose matches have all been played, inside the window.
       .filter((c) => c.lastKickoff < now.getTime() && c.lastKickoff >= since.getTime())
       .filter((c) => this.inScope(c.international, scope));
+    // The same selections rebuilt into a second cluster count once.
+    const clusters = (engineSettings().countOnce ? firstOfEach(built, (c) => c.signature) : built).map(
+      ({ signature: _s, ...c }) => c,
+    );
 
     const decided = clusters.filter((c) => c.outcome === 'WIN' || c.outcome === 'LOSS');
     return {

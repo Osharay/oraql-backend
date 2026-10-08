@@ -18,6 +18,7 @@ import { BoardService } from './board.service';
 import type { BoardSort } from './market-board';
 import type { FormSort } from './form-summary';
 import { EngineJob, EngineJobsService } from './engine-jobs.service';
+import { engineSettings } from './engine-settings';
 
 /** What a background admin POST answers with; poll GET /streaks/jobs/:id. */
 const BOARD_SORTS: BoardSort[] = ['probability', 'edge', 'confidence', 'run'];
@@ -239,6 +240,19 @@ export class StreaksController {
       window: Number(window) || undefined,
       sort: (['lift', 'rate', 'run'].includes(String(sort)) ? sort : 'lift') as FormSort,
     });
+  }
+
+  @Get('league-coverage')
+  @UseGuards(AdminGuard)
+  @ApiOperation({ summary: 'Leagues whose results we cannot settle, and so are left out of streaks and clusters' })
+  async coverage() {
+    const c = await this.snapshots.leagueCoverage();
+    return {
+      minShare: engineSettings().leagueMinSettled,
+      days: engineSettings().leagueSettleDays,
+      hidden: c.rows.filter((r) => r.hidden),
+      watched: c.rows.filter((r) => !r.hidden && r.share < 0.95 && r.finished >= 5).slice(0, 30),
+    };
   }
 
   @Get('candidates')

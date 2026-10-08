@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { leagueCoverage, isHidden } from './league-coverage';
 import { betKey } from './bet-key';
 import { PrismaService } from '@/common/prisma/prisma.service';
 import {
@@ -35,6 +36,11 @@ export class SnapshotsService {
   private readonly SUGGESTIVE_LIMIT = 200;
 
   constructor(private readonly prisma: PrismaService) {}
+
+  /** Leagues whose results we cannot settle, read fresh (for Engine controls). */
+  leagueCoverage() {
+    return leagueCoverage(this.prisma, true);
+  }
 
   /**
    * Capture snapshots for upcoming events from the latest engine run.
@@ -142,8 +148,15 @@ export class SnapshotsService {
         kickoffAt: { gt: now, lte: new Date(now.getTime() + windowHours * 3600_000) },
         status: { in: [EventStatus.SCHEDULED, EventStatus.LINEUP_CONFIRMED] },
       },
-      select: { id: true, kickoffAt: true, homeTeamId: true, awayTeamId: true },
+      select: { id: true, kickoffAt: true, homeTeamId: true, awayTeamId: true, leagueId: true },
     });
+
+    // Leagues (or their corner and card markets) whose results we cannot
+    // check: a pick there could never be judged, so none is captured.
+    const coverage = await leagueCoverage(this.prisma);
+    const definitionIds = await this.prisma.marketDefinition.findMany({ select: { id: true, marketId: true } });
+    const marketIdOf = new Map(definitionIds.map((d) => [d.id, d.marketId]));
+    let skippedUnsettleable = 0;
 
     const rows: Prisma.StreakSnapshotCreateManyInput[] = [];
     const rowKeys: string[] = [];
@@ -163,7 +176,7 @@ export class SnapshotsService {
       //   HOME/AWAY  — measured at that venue, so only that side
       //   MATCH      — fixture-level, either side (deduped below)
       //   null       — venue-agnostic team slice, whichever side the team is on
-      const applicable = [
+      const listed = [
         ...(byTeam.get(event.homeTeamId) ?? []).filter(
           (c) =>
             c.selection === null ||
@@ -174,6 +187,8 @@ export class SnapshotsService {
           (c) => c.selection === null || c.selection === ObservationSelection.AWAY,
         ),
       ];
+      const applicable = listed.filter((c) => !isHidden(coverage, event.leagueId, marketIdOf.get(c.marketDefinitionId) ?? ''));
+      skippedUnsettleable += listed.length - applicable.length;
 
       // A MATCH-market candidate can arrive from both teams; keep one per market.
       const seenMatchMarkets = new Set<string>();
@@ -253,7 +268,7 @@ export class SnapshotsService {
 
     this.logger.log(
       `Captured ${fresh.length} snapshots (${survivors.length} gated, ${suggestive.length} suggestive candidates), ` +
-        `displayed ${top.length}, skipped ${skippedPastCutoff} past cutoff`,
+        `displayed ${top.length}, skipped ${skippedPastCutoff} past cutoff, ${skippedUnsettleable} in leagues we cannot settle`,
     );
 
     return {
@@ -262,6 +277,7 @@ export class SnapshotsService {
       gatedCandidates: survivors.length,
       suggestiveCandidates: suggestive.length,
       skippedPastCutoff,
+      skippedUnsettleable,
       note: 'ok',
     };
   }

@@ -43,8 +43,10 @@ export function hitRateBy<T extends SettledItem>(items: T[], key: (i: T) => stri
 
 /** What drove a streak pick: its last few games, or its whole record. */
 export function driverOf(context: unknown, hitRate: number): 'RECENT' | 'SEASON' {
-  const c = (context ?? {}) as { emerging?: boolean; formRate?: number };
+  const c = (context ?? {}) as { emerging?: boolean; formRate?: number; chance?: number; seasonRate?: number };
   if (c.emerging) return 'RECENT';
+  // Since form only nudges the season figure: led by form when it lifted it.
+  if (typeof c.chance === 'number' && typeof c.seasonRate === 'number') return c.chance - c.seasonRate >= 0.03 ? 'RECENT' : 'SEASON';
   if (typeof c.formRate === 'number' && c.formRate - hitRate >= 0.05) return 'RECENT';
   return 'SEASON';
 }

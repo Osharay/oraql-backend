@@ -4,7 +4,10 @@ import { isInternationalCompetition } from '@/common/international';
 import { streakMarketLabel } from '@/common/market-copy';
 import { marketScope } from '@/modules/streaks/market-definitions';
 import { londonDay, londonDayBounds, londonDayStart } from '@/common/london-day';
+import { shownChance } from '@/modules/streaks/recent-form';
 import { betKey } from '@/modules/streaks/bet-key';
+import { dropContradictions } from '@/modules/streaks/contradictions';
+import { engineSettings } from '@/modules/streaks/engine-settings';
 import { clusterOutcome, driverOf, hitRate, type SettledItem } from '@/modules/results/results-summary';
 import { firstOfEach } from './first-of-each';
 
@@ -188,19 +191,30 @@ export class RecordService {
         entityId: r.streakCandidate.entityId,
       }),
     );
-    const teamName = await this.teamNames(unique.map((r) => r.streakCandidate));
+    const shown = engineSettings().hideContradictions
+      ? dropContradictions(
+          unique,
+          (r) => r.eventId,
+          (r) => ({
+            marketId: r.streakCandidate.marketDefinition.marketId,
+            team: marketScope(r.streakCandidate.marketDefinition.marketId) === 'TEAM' ? r.streakCandidate.entityId : null,
+          }),
+          (r) => shownChance(r.streakCandidate.context, r.hitRate),
+        )
+      : unique;
+    const teamName = await this.teamNames(shown.map((r) => r.streakCandidate));
 
-    return unique
+    return shown
       .map((r) => {
         const sc = r.streakCandidate;
-        const ctx = (sc.context ?? {}) as { emerging?: boolean; formRate?: number };
+        const ctx = (sc.context ?? {}) as { emerging?: boolean };
         const tier = sc.survivedGate ? 'evidence' : ctx.emerging ? 'emerging' : 'exploratory';
         const name = sc.entityType === 'TEAM' ? teamName.get(sc.entityId) ?? null : null;
         return {
           match: this.head(r.event),
           label: streakMarketLabel(sc.marketDefinition.displayName, marketScope(sc.marketDefinition.marketId), name),
           result: String(r.result?.result ?? 'UNKNOWN'),
-          probability: typeof ctx.formRate === 'number' ? ctx.formRate : r.hitRate,
+          probability: shownChance(sc.context, r.hitRate),
           tier,
           driver: driverOf(sc.context, r.hitRate),
         };
@@ -241,6 +255,7 @@ export class RecordService {
                     entityId: true,
                     selection: true,
                     marketDefinitionId: true,
+                    context: true,
                     marketDefinition: { select: { marketId: true, displayName: true } },
                   },
                 },
@@ -266,7 +281,7 @@ export class RecordService {
             match: this.head(s.event),
             label: streakMarketLabel(sc.marketDefinition.displayName, marketScope(sc.marketDefinition.marketId), name),
             result: s.result?.result ? String(s.result.result) : null,
-            probability: s.hitRate,
+            probability: (sc.context as { chance?: number } | null)?.chance ?? s.hitRate,
           };
         });
         const kicks = legs.map((l) => l.match.kickoffAt.getTime());

@@ -1,4 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { dropContradictions } from './contradictions';
+import { isHidden, leagueCoverage } from './league-coverage';
+import { engineSettings } from './engine-settings';
+import { shownChance } from './recent-form';
 import { PrismaService } from '@/common/prisma/prisma.service';
 import {
   EventStatus,
@@ -788,6 +792,7 @@ export class CandidatesService {
               homeTeamId: true,
               awayTeamId: true,
               absencesCheckedAt: true,
+              leagueId: true,
               homeTeam: { select: { id: true, name: true, rating: true, ratingTier: true } },
               awayTeam: { select: { id: true, name: true, rating: true, ratingTier: true } },
               league: { select: { name: true, country: true } },
@@ -814,7 +819,7 @@ export class CandidatesService {
     for (const t of teams) byId.set(t.id, { id: t.id, type: 'TEAM', name: t.name, shortName: t.shortName ?? null });
     for (const l of leagues) byId.set(l.id, { id: l.id, type: 'LEAGUE', name: l.name, shortName: null });
 
-    return candidates.map((c) => {
+    const listed = candidates.map((c) => {
       const entity = byId.get(c.entityId) ?? null;
       const marketId = (c as unknown as { marketDefinition?: { marketId?: string } })
         .marketDefinition?.marketId;
@@ -844,6 +849,29 @@ export class CandidatesService {
         ...(split ? { opponentSplit: { ...split, next: nextBand(fixture) } } : {}),
       };
     });
+
+    // Leagues (or their corner and card markets) we cannot settle: not shown.
+    const coverage = await leagueCoverage(this.prisma);
+    const leagueOfEvent = new Map(
+      (upcoming as Array<{ id: string; leagueId?: string }>).map((e) => [e.id, e.leagueId ?? null]),
+    );
+    const marketIdOf = (c: (typeof listed)[number]) =>
+      (c as unknown as { marketDefinition?: { marketId?: string } }).marketDefinition?.marketId ?? '';
+    const settleable = listed.filter(
+      (c) => !c.nextFixture || !isHidden(coverage, leagueOfEvent.get(c.nextFixture.eventId), marketIdOf(c)),
+    );
+
+    // Two picks on one match that cannot both land: show the likelier.
+    if (!engineSettings().hideContradictions) return settleable;
+    return dropContradictions(
+      settleable,
+      (c) => c.nextFixture?.eventId,
+      (c) => {
+        const id = (c as unknown as { marketDefinition?: { marketId?: string } }).marketDefinition?.marketId ?? '';
+        return { marketId: id, team: id && marketScope(id) === 'TEAM' ? c.entityId : null };
+      },
+      (c) => shownChance((c as unknown as { context?: unknown }).context, (c as unknown as { hitRate?: number }).hitRate ?? 0),
+    );
   }
 
   /** Survivors of the most recent completed run, strongest first. */

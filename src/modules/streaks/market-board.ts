@@ -1,3 +1,4 @@
+import { capChance } from './recent-form';
 /**
  * The fixture market board: every market in the registry, estimated for one
  * upcoming fixture from what both teams have actually done.
@@ -54,7 +55,7 @@ export function combineSides(sides: SideEvidence[], baseline: number | null, k =
 } {
   const played = sides.reduce((n, s) => n + s.played, 0);
   const wins = sides.reduce((n, s) => n + s.wins, 0);
-  return { probability: shrunkRate(wins, played, baseline, k), wins, played };
+  return { probability: capChance(shrunkRate(wins, played, baseline, k)), wins, played };
 }
 
 /**
