@@ -125,7 +125,7 @@ export class ClustersService {
     // One already under way is on the record, win or lose, and stays as it was.
     const existing = await this.prisma.cluster.findMany({
       where: { date: { gte: start, lte: end } },
-      select: { id: true, components: { select: { snapshot: { select: { kickoffAt: true } } } } },
+      select: { id: true, components: { select: { snapshot: { select: { kickoffAt: true, eventId: true } } } } },
     });
     const locked = existing.filter((c) => c.components.some((k) => k.snapshot.kickoffAt <= now));
     const replaceable = existing.filter((c) => !locked.includes(c)).map((c) => c.id);
@@ -172,12 +172,21 @@ export class ClustersService {
     const gated = flatten(rows.filter((s) => s.streakCandidate.survivedGate));
     const suggestive = flatten(rows.filter((s) => !s.streakCandidate.survivedGate));
 
+    // A match goes into one of the day's clusters only: three clusters that
+    // each lean on the same Flamengo game all fail together if it goes wrong.
+    const usedEvents = new Set<string>(
+      bar ? locked.flatMap((c) => c.components.map((k) => k.snapshot.eventId)) : [],
+    );
     const fill = (pool: Selectable[], type: ClusterType, want: number) => {
       for (let i = 0; i < want; i++) {
-        const found = pickDiverseComponents(pool, { size, requireDistinctLeague, used });
+        const open = bar ? pool.filter((p) => !usedEvents.has(p.eventId)) : pool;
+        const found = pickDiverseComponents(open, { size, requireDistinctLeague, used });
         const picked = bar ? trimToBar(found, settings.clusterMinCombined) : found;
         if (!picked || picked.length < MIN_CLUSTER_SIZE) break;
-        picked.forEach((p) => used.add(p.id));
+        picked.forEach((p) => {
+          used.add(p.id);
+          if (bar) usedEvents.add(p.eventId);
+        });
         clusters.push({ components: picked, type });
       }
     };
