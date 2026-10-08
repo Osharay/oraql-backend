@@ -27,6 +27,7 @@ import { ProbabilityModule } from '@/modules/probability/probability.module';
 import { StorageModule } from '@/modules/storage/storage.module';
 import { ResultsModule } from '@/modules/results/results.module';
 import { RecordModule } from '@/modules/record/record.module';
+import { CustomClustersModule } from '@/modules/custom-clusters/custom-clusters.module';
 
 @Module({
   imports: [
@@ -89,6 +90,7 @@ import { RecordModule } from '@/modules/record/record.module';
     StorageModule,
     ResultsModule,
     RecordModule,
+    CustomClustersModule,
   ],
 })
 export class AppModule {}

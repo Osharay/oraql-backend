@@ -34,6 +34,7 @@ export class BuilderService {
             name: true,
             shortName: true,
             category: true,
+            origin: true,
             probability: true,
             isValueBet: true,
             event: {
@@ -79,7 +80,7 @@ export class BuilderService {
    */
   async addStreakSelection(
     userId: string,
-    input: { eventId: string; marketId: string; teamId?: string | null; probability?: number },
+    input: { eventId: string; marketId: string; teamId?: string | null; probability?: number; source?: string },
   ) {
     const def = MARKET_DEFINITIONS.find((d) => d.marketId === input.marketId);
     if (!def) throw new BadRequestException(`Unknown market ${input.marketId}`);
@@ -99,6 +100,9 @@ export class BuilderService {
     const scope = marketScope(def.marketId);
     const side = legSide(scope, input.teamId, event);
     if (!side) throw new BadRequestException('That team is not playing in this match');
+    // Kept with the selection, so a saved cluster says where each one came
+    // from and can settle it from the streak's own market.
+    const origin = { source: input.source ?? 'STREAK_EXPLORATORY', streakMarketId: def.marketId, streakSide: side };
 
     // The model names markets with short names where it has them.
     const short = {
@@ -111,7 +115,7 @@ export class BuilderService {
         where: { eventId: event.id, name: modelName, origin: 'MODEL' },
         select: { id: true },
       });
-      if (model) return this.addSelection(userId, model.id);
+      if (model) return this.addSelection(userId, model.id, origin);
     }
 
     const teamName = side === 'HOME' ? event.homeTeam.name : side === 'AWAY' ? event.awayTeam.name : null;
@@ -144,13 +148,17 @@ export class BuilderService {
           select: { id: true },
         });
 
-    return this.addSelection(userId, market.id);
+    return this.addSelection(userId, market.id, origin);
   }
 
   /**
    * Add a market to the Bet Builder.
    */
-  async addSelection(userId: string, marketId: string) {
+  async addSelection(
+    userId: string,
+    marketId: string,
+    origin?: { source: string; streakMarketId: string; streakSide: string },
+  ) {
     // Verify market exists
     const market = await this.prisma.market.findUnique({
       where: { id: marketId },
@@ -191,9 +199,11 @@ export class BuilderService {
         userId,
         marketId,
         addedProbability: market.probability,
+        ...(origin ?? {}),
       },
       update: {
         addedProbability: market.probability,
+        ...(origin ?? {}),
       },
       include: {
         market: {

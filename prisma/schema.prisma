@@ -51,6 +51,7 @@ model User {
   // Relations
   builderSelections BuilderSelection[]
   activityLogs      UserActivityLog[]
+  customClusters    CustomCluster[]
 
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
@@ -258,6 +259,7 @@ model Event {
   observations    MarketObservation[]
   streakSnapshots StreakSnapshot[]
   pickResults     PickResult[]
+  customClusterLegs CustomClusterLeg[]
 
   // Timestamps
   lineupsConfirmedAt DateTime?
@@ -490,6 +492,13 @@ model BuilderSelection {
   marketId        String
   market          Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
   addedProbability Float   // probability at time of adding to builder
+  /// Where it was added from: STREAK_EVIDENCE, STREAK_EMERGING,
+  /// STREAK_EXPLORATORY, CLUSTER, MATCH_FORM, or null for a match-page market.
+  source          String?
+  /// For a streak selection: its market definition and side, so a saved
+  /// cluster can settle it from observations when the model has no market.
+  streakMarketId  String?
+  streakSide      String?
 
   createdAt       DateTime @default(now())
 
@@ -865,4 +874,52 @@ model PickResult {
   @@unique([eventId, marketName])
   @@index([kickoffAt])
   @@map("pick_results")
+}
+
+/// A cluster a user put together from the Bet Builder and saved, to see how
+/// it would have gone without placing it. Locked once saved: the selections
+/// are copied, and it can only be deleted before its first match starts.
+model CustomCluster {
+  id                  String             @id @default(uuid())
+  userId              String
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                String?
+  legCount            Int
+  /// The builder's combined chance; null when selections share a match, and
+  /// the range is the answer.
+  combinedProbability Float?
+  combinedLow         Float
+  combinedHigh        Float
+  firstKickoffAt      DateTime
+  lastKickoffAt       DateTime
+  legs                CustomClusterLeg[]
+  createdAt           DateTime           @default(now())
+
+  @@index([userId, createdAt])
+  @@map("custom_clusters")
+}
+
+model CustomClusterLeg {
+  id             String             @id @default(uuid())
+  clusterId      String
+  cluster        CustomCluster      @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  eventId        String
+  event          Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  rank           Int
+  marketName     String
+  category       String
+  /// MODEL or STREAK, as on the market it was copied from.
+  origin         String
+  source         String?
+  streakMarketId String?
+  streakSide     String?
+  probability    Float
+  kickoffAt      DateTime
+  result         ObservationResult?
+  settledAt      DateTime?
+
+  @@index([clusterId])
+  @@index([eventId])
+  @@index([result, kickoffAt])
+  @@map("custom_cluster_legs")
 }
