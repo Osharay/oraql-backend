@@ -9,6 +9,8 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule, {
     logger: ['error', 'warn', 'log', 'debug', 'verbose'],
+    // Kept for webhook signatures (Bachs signs the exact bytes it sent).
+    rawBody: true,
   });
 
   const config = app.get(ConfigService);

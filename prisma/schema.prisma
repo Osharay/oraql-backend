@@ -48,7 +48,13 @@ model User {
   // Tokens
   refreshToken     String?
 
+  // Billing: the free trial runs to trialEndsAt (null = sign-up + the trial
+  // length); a paid period runs to subscriptionEndsAt.
+  trialEndsAt        DateTime?
+  subscriptionEndsAt DateTime?
+
   // Relations
+  payments          Payment[]
   builderSelections BuilderSelection[]
   activityLogs      UserActivityLog[]
   customClusters    CustomCluster[]
@@ -922,4 +928,47 @@ model CustomClusterLeg {
   @@index([eventId])
   @@index([result, kickoffAt])
   @@map("custom_cluster_legs")
+}
+
+/// Prices, trial length and the paywall switch, edited from Engine controls.
+/// One row, id "default".
+model BillingSettings {
+  id             String   @id @default("default")
+  /// Whole naira.
+  monthlyPrice   Int      @default(5000)
+  quarterlyPrice Int      @default(10000)
+  trialDays      Int      @default(2)
+  paywallEnabled Boolean  @default(true)
+  currency       String   @default("NGN")
+  updatedAt      DateTime @updatedAt
+
+  @@map("billing_settings")
+}
+
+/// One checkout. Paid once only: fulfilment moves PENDING to PAID atomically,
+/// so a webhook and the return page arriving together extend access once.
+model Payment {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// FLUTTERWAVE or BACHS.
+  provider    String
+  /// MONTHLY or QUARTERLY.
+  plan        String
+  /// Whole naira, as charged.
+  amount      Int
+  currency    String
+  periodDays  Int
+  /// Ours, sent to the provider (Flutterwave tx_ref, Bachs reference).
+  reference   String    @unique
+  /// The provider's own id (Flutterwave transaction id, Bachs checkout id).
+  providerRef String?
+  /// PENDING, PAID or FAILED.
+  status      String    @default("PENDING")
+  paidAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@map("payments")
 }

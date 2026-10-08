@@ -28,6 +28,7 @@ import { StorageModule } from '@/modules/storage/storage.module';
 import { ResultsModule } from '@/modules/results/results.module';
 import { RecordModule } from '@/modules/record/record.module';
 import { CustomClustersModule } from '@/modules/custom-clusters/custom-clusters.module';
+import { BillingModule } from '@/modules/billing/billing.module';
 
 @Module({
   imports: [
@@ -91,6 +92,7 @@ import { CustomClustersModule } from '@/modules/custom-clusters/custom-clusters.
     ResultsModule,
     RecordModule,
     CustomClustersModule,
+    BillingModule,
   ],
 })
 export class AppModule {}

@@ -1,3 +1,4 @@
+import { NoPaywall } from '@/common/decorators/no-paywall.decorator';
 import {
   Controller,
   Post,
@@ -22,6 +23,7 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { frontendUrl } from '@/config/app.config';
 
 @ApiTags('auth')
+@NoPaywall()
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
