@@ -37,6 +37,51 @@ export interface MatchHead {
 export class RecordService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private publicCache: { at: number; value: unknown } | null = null;
+
+  /**
+   * The public track record on the landing page: the last 7 UK days, settled
+   * calls only (win and loss), each with its match, pick, OraQL chance and
+   * result. Nothing still to be played is included, so today's and upcoming
+   * picks stay for subscribers, and nothing about how a chance was worked out.
+   * Cached for 10 minutes because anyone can open it.
+   */
+  async publicRecord() {
+    if (this.publicCache && Date.now() - this.publicCache.at < 10 * 60_000) return this.publicCache.value;
+    const DAYS = 7;
+    const summary = await this.daily(DAYS, 'all');
+    const details = await Promise.all(summary.days.map((d) => this.day(d.date, 'all')));
+    const strip = (m: MatchHead) => ({ kickoffAt: m.kickoffAt, home: m.home, away: m.away, score: m.score, league: m.league });
+    const value = {
+      from: summary.from,
+      to: summary.to,
+      totals: { streaks: summary.totals.streaks, clusters: summary.totals.clusters },
+      days: summary.days.map((d, i) => {
+        const det = details[i];
+        return {
+          date: d.date,
+          streaks: d.streaks,
+          clusters: d.clusters,
+          matches: (det?.matches ?? []).map((g) => ({
+            match: strip(g.match),
+            picks: g.items
+              .filter((p) => p.result === 'WIN' || p.result === 'LOSS')
+              .map((p) => ({ label: p.label, chance: p.probability, result: p.result })),
+          })).filter((g) => g.picks.length > 0),
+          clusterList: (det?.clusters ?? [])
+            .filter((c) => c.outcome === 'WIN' || c.outcome === 'LOSS')
+            .map((c) => ({
+              outcome: c.outcome,
+              chance: c.combinedProbability,
+              legs: c.legs.map((l) => ({ match: strip(l.match), label: l.label, chance: l.probability, result: l.result })),
+            })),
+        };
+      }),
+    };
+    this.publicCache = { at: Date.now(), value };
+    return value;
+  }
+
   /**
    * The streaks and clusters OraQL gave, day by day, and how they landed.
    *

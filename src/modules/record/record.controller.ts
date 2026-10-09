@@ -1,6 +1,7 @@
 import { BadRequestException, Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@/modules/auth/guards/jwt-auth.guard';
+import { Public } from '@/common/decorators/public.decorator';
 import { RecordService, ResultsScope } from './record.service';
 
 const SCOPES: ResultsScope[] = ['all', 'club', 'international'];
@@ -18,6 +19,13 @@ export class RecordController {
   daily(@Query('days') days?: string, @Query('scope') scope?: string) {
     const d = Math.min(Math.max(Number(days) || 30, 1), 90);
     return this.record.daily(d, scopeOf(scope));
+  }
+
+  @Get('public')
+  @Public()
+  @ApiOperation({ summary: 'The last 7 days of settled streaks and clusters, for the landing page (no sign-in)' })
+  publicRecord() {
+    return this.record.publicRecord();
   }
 
   @Get('day')
