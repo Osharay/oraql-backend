@@ -79,3 +79,23 @@ describe('webhook signatures', () => {
     expect(bachsSignatureOk({ signatureV2: `t=${ts},v1=${sig}` }, body, undefined, now)).toBe(false);
   });
 });
+
+describe('Bachs headers under either name', () => {
+  const { bachsHeaders } = jest.requireActual('./billing.controller');
+  const secret = 'whsec_test';
+  const body = '{"type":"checkout.completed"}';
+  const now = new Date();
+  const ts = String(Math.floor(now.getTime() / 1000));
+  const sig = createHmac('sha256', secret).update(`${ts}.${body}`).digest('hex');
+
+  it('reads the documented X- headers', () => {
+    expect(bachsSignatureOk(bachsHeaders({ 'x-bachs-signature-v2': `t=${ts},v1=${sig}` }), body, secret, now)).toBe(true);
+    expect(bachsSignatureOk(bachsHeaders({ 'x-bachs-signature': sig, 'x-bachs-timestamp': ts }), body, secret, now)).toBe(true);
+  });
+
+  it('reads the portal\'s Bachs-Signature, in either layout', () => {
+    expect(bachsSignatureOk(bachsHeaders({ 'bachs-signature': `t=${ts},v1=${sig}` }), body, secret, now)).toBe(true);
+    expect(bachsSignatureOk(bachsHeaders({ 'bachs-signature': sig, 'bachs-timestamp': ts }), body, secret, now)).toBe(true);
+    expect(bachsSignatureOk(bachsHeaders({ 'bachs-signature': 'v1=deadbeef', 'bachs-timestamp': ts }), body, secret, now)).toBe(false);
+  });
+});

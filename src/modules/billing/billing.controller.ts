@@ -31,6 +31,20 @@ class SettingsDto {
   @IsOptional() @IsBoolean() paywallEnabled?: boolean;
 }
 
+/**
+ * Bachs's docs name the headers X-Bachs-Signature(-V2) and X-Bachs-Timestamp;
+ * its portal says Bachs-Signature. Both are read. A value in the
+ * `t=…,v1=…` form is the V2 layout whichever name it arrives under.
+ */
+export function bachsHeaders(h: Record<string, string | undefined>) {
+  const v2 = h['x-bachs-signature-v2'] ?? h['bachs-signature-v2'];
+  const v1 = h['x-bachs-signature'] ?? h['bachs-signature'];
+  const timestamp = h['x-bachs-timestamp'] ?? h['bachs-timestamp'];
+  if (v2) return { signatureV2: v2, signature: v1, timestamp };
+  if (v1 && v1.includes('v1=')) return { signatureV2: v1, timestamp };
+  return { signature: v1, timestamp };
+}
+
 @ApiTags('billing')
 @Controller('billing')
 export class BillingController {
@@ -103,11 +117,7 @@ export class BillingController {
     const raw = req.rawBody;
     if (!raw) throw new BadRequestException('No body');
     const ok = bachsSignatureOk(
-      {
-        signatureV2: headers['x-bachs-signature-v2'],
-        signature: headers['x-bachs-signature'],
-        timestamp: headers['x-bachs-timestamp'],
-      },
+      bachsHeaders(headers),
       raw,
       process.env.BACHS_WEBHOOK_SECRET,
       new Date(),
