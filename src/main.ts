@@ -23,7 +23,21 @@ async function bootstrap() {
 
   // CORS
   app.enableCors({
-    origin: corsOrigins.split(',').map((o) => o.trim()),
+    // The configured list, plus the site's own addresses so a domain change
+    // (oraql-five.vercel.app → oraql.live) never locks the site out of its API.
+    origin: [
+      ...new Set(
+        [
+          ...corsOrigins.split(','),
+          config.get<string>('FRONTEND_URL', ''),
+          'https://oraql.live',
+          'https://www.oraql.live',
+          'https://oraql-five.vercel.app',
+        ]
+          .map((o) => o.trim().replace(/\/$/, ''))
+          .filter(Boolean),
+      ),
+    ],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
