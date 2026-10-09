@@ -938,6 +938,7 @@ model CustomClusterLeg {
 model BillingSettings {
   id             String   @id @default("default")
   /// Whole naira.
+  dailyPrice     Int      @default(200)
   monthlyPrice   Int      @default(5000)
   quarterlyPrice Int      @default(10000)
   trialDays      Int      @default(2)

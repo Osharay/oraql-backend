@@ -130,9 +130,9 @@ describe('BillingService', () => {
     (flutterwaveVerify as jest.Mock).mockResolvedValue({ id: 3, tx_ref: first.reference, status: 'successful', amount: 5000, currency: 'NGN' });
     await svc.confirm(first.reference, 'u1');
 
-    await expect(svc.checkout('u1', 'MONTHLY', 'FLUTTERWAVE')).rejects.toThrow('already on the monthly plan');
+    await expect(svc.checkout('u1', 'MONTHLY', 'FLUTTERWAVE')).rejects.toThrow('or upgrade to 3 months now');
     const status = await svc.status('u1');
-    expect(status.plans.map((p) => [p.id, p.buyable])).toEqual([['MONTHLY', false], ['QUARTERLY', true]]);
+    expect(status.plans.map((p) => [p.id, p.buyable])).toEqual([['DAILY', false], ['MONTHLY', false], ['QUARTERLY', true]]);
 
     const up = await svc.checkout('u1', 'QUARTERLY', 'FLUTTERWAVE');
     (flutterwaveVerify as jest.Mock).mockResolvedValue({ id: 4, tx_ref: up.reference, status: 'successful', amount: 10000, currency: 'NGN' });

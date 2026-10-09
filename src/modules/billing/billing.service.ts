@@ -21,7 +21,7 @@ import { flutterwaveCheckout, flutterwaveConfigured, flutterwaveVerify } from '.
 import { bachsCheckout, bachsConfigured, bachsPaid, bachsSession } from './providers/bachs';
 
 const SETTINGS_ID = 'default';
-const DEFAULTS: PriceSettings = { monthlyPrice: 5000, quarterlyPrice: 10000, trialDays: 2, paywallEnabled: true, currency: 'NGN' };
+const DEFAULTS: PriceSettings = { dailyPrice: 200, monthlyPrice: 5000, quarterlyPrice: 10000, trialDays: 2, paywallEnabled: true, currency: 'NGN' };
 
 /**
  * The paywall: a free trial after sign-up, then a paid month or three.
@@ -44,6 +44,7 @@ export class BillingService {
     const row = await this.prisma.billingSettings.findUnique({ where: { id: SETTINGS_ID } });
     const value: PriceSettings = row
       ? {
+          dailyPrice: row.dailyPrice,
           monthlyPrice: row.monthlyPrice,
           quarterlyPrice: row.quarterlyPrice,
           trialDays: row.trialDays,
@@ -57,7 +58,7 @@ export class BillingService {
 
   async updateSettings(input: Partial<PriceSettings>) {
     const clean: Partial<PriceSettings> = {};
-    for (const k of ['monthlyPrice', 'quarterlyPrice', 'trialDays'] as const) {
+    for (const k of ['dailyPrice', 'monthlyPrice', 'quarterlyPrice', 'trialDays'] as const) {
       if (input[k] == null) continue;
       const v = Math.round(Number(input[k]));
       if (!Number.isFinite(v) || v < 0) throw new BadRequestException(`${k} must be a whole number of 0 or more`);

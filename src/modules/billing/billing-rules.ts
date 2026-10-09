@@ -9,14 +9,17 @@ import { createHmac, timingSafeEqual } from 'crypto';
  * to whatever is left, so paying early never loses days.
  */
 
-export type PlanId = 'MONTHLY' | 'QUARTERLY';
+export type PlanId = 'DAILY' | 'MONTHLY' | 'QUARTERLY';
 export type ProviderId = 'FLUTTERWAVE' | 'BACHS';
 export type AccessState = 'ADMIN' | 'COMP' | 'OFF' | 'TRIAL' | 'ACTIVE' | 'EXPIRED';
 
-export const PLAN_DAYS: Record<PlanId, number> = { MONTHLY: 30, QUARTERLY: 90 };
-export const PLAN_LABEL: Record<PlanId, string> = { MONTHLY: '1 month', QUARTERLY: '3 months' };
+export const PLANS: PlanId[] = ['DAILY', 'MONTHLY', 'QUARTERLY'];
+export const PLAN_DAYS: Record<PlanId, number> = { DAILY: 1, MONTHLY: 30, QUARTERLY: 90 };
+export const PLAN_LABEL: Record<PlanId, string> = { DAILY: '1 day', MONTHLY: '1 month', QUARTERLY: '3 months' };
+const RANK: Record<PlanId, number> = { DAILY: 0, MONTHLY: 1, QUARTERLY: 2 };
 
 export interface PriceSettings {
+  dailyPrice: number;
   monthlyPrice: number;
   quarterlyPrice: number;
   trialDays: number;
@@ -65,29 +68,28 @@ export interface BuyContext {
 
 /**
  * Whether a plan can be bought now. Anyone without a running paid period can
- * buy either plan. While one runs, the only purchases are an upgrade from the
- * month to three months, or a renewal in the last few days — so nobody pays
- * twice for time they already have. Bought days still go on top of what is left.
+ * buy any plan. While one runs, the only purchases are an upgrade to a longer
+ * plan, or a renewal in the last few days — so nobody pays twice for time they
+ * already have. (A day pass is always inside that window, so it can be renewed
+ * at any time.) Bought days still go on top of what is left.
  */
 export function canBuy(plan: PlanId, c: BuyContext, now: Date): { ok: boolean; reason?: string; renewFrom?: Date } {
   if (!c.active || !c.endsAt || c.endsAt <= now) return { ok: true };
   const renewFrom = new Date(c.endsAt.getTime() - RENEW_WINDOW_DAYS * 86_400_000);
   if (now >= renewFrom) return { ok: true };
-  if (plan === 'QUARTERLY' && c.currentPlan === 'MONTHLY') return { ok: true };
+  if (c.currentPlan && RANK[plan] > RANK[c.currentPlan]) return { ok: true };
+  const upgrade = c.currentPlan === 'MONTHLY' ? ', or upgrade to 3 months now' : '';
   return {
     ok: false,
     renewFrom,
-    reason:
-      plan === 'MONTHLY' && c.currentPlan === 'MONTHLY'
-        ? 'You are already on the monthly plan. You can renew in its last 3 days, or upgrade to 3 months now.'
-        : 'You already have an active subscription. You can renew in its last 3 days.',
+    reason: `You already have an active subscription. You can renew in its last ${RENEW_WINDOW_DAYS} days${upgrade}.`,
   };
 }
 
 /**
  * What a paid payment buys, going by the money the provider says arrived. If
- * a payment recorded as one month was paid at the 3-month price or more, the
- * user gets the 3 months they paid for rather than the record winning.
+ * a payment was paid at the price of a longer plan, the user gets the longer
+ * plan they paid for rather than the record winning.
  */
 export function planForPaid(
   recorded: { plan: PlanId; amount: number },
@@ -95,24 +97,28 @@ export function planForPaid(
   s: PriceSettings,
 ): { plan: PlanId; days: number; amount: number; corrected: boolean } {
   const paid = paidAmount == null ? NaN : Number(paidAmount);
-  if (recorded.plan === 'MONTHLY' && Number.isFinite(paid) && paid >= s.quarterlyPrice && s.quarterlyPrice > s.monthlyPrice) {
-    return { plan: 'QUARTERLY', days: PLAN_DAYS.QUARTERLY, amount: Math.round(paid), corrected: true };
+  if (Number.isFinite(paid)) {
+    const better = [...PLANS]
+      .reverse()
+      .find((id) => RANK[id] > RANK[recorded.plan] && paid >= priceOf(s, id) && priceOf(s, id) > priceOf(s, recorded.plan));
+    if (better) return { plan: better, days: PLAN_DAYS[better], amount: Math.round(paid), corrected: true };
   }
   return { plan: recorded.plan, days: PLAN_DAYS[recorded.plan], amount: recorded.amount, corrected: false };
 }
 
 export function priceOf(s: PriceSettings, plan: PlanId): number {
-  return plan === 'MONTHLY' ? s.monthlyPrice : s.quarterlyPrice;
+  return plan === 'DAILY' ? s.dailyPrice : plan === 'MONTHLY' ? s.monthlyPrice : s.quarterlyPrice;
 }
 
 export function plansOf(s: PriceSettings) {
-  const monthlyFor3 = s.monthlyPrice * 3;
-  return (['MONTHLY', 'QUARTERLY'] as PlanId[]).map((id) => ({
+  // Saving against buying the next shorter plan over the same days.
+  const versus: Record<PlanId, number> = { DAILY: 0, MONTHLY: s.dailyPrice * 30, QUARTERLY: s.monthlyPrice * 3 };
+  return PLANS.map((id) => ({
     id,
     label: PLAN_LABEL[id],
     price: priceOf(s, id),
     days: PLAN_DAYS[id],
-    saving: id === 'QUARTERLY' && monthlyFor3 > s.quarterlyPrice ? monthlyFor3 - s.quarterlyPrice : 0,
+    saving: Math.max(0, versus[id] - priceOf(s, id)),
   }));
 }
 

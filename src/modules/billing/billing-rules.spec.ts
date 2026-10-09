@@ -1,7 +1,7 @@
 import { createHmac } from 'crypto';
 import { accessOf, bachsSignatureOk, extendedEnd, flutterwaveSignatureOk, paymentMatches, plansOf } from './billing-rules';
 
-const settings = { monthlyPrice: 5000, quarterlyPrice: 10000, trialDays: 2, paywallEnabled: true, currency: 'NGN' };
+const settings = { dailyPrice: 200, monthlyPrice: 5000, quarterlyPrice: 10000, trialDays: 2, paywallEnabled: true, currency: 'NGN' };
 const now = new Date('2026-10-09T12:00:00Z');
 const day = 86_400_000;
 const user = (o: Partial<{ role: string; createdAt: Date; trialEndsAt: Date | null; subscriptionEndsAt: Date | null }> = {}) => ({
@@ -97,5 +97,38 @@ describe('Bachs headers under either name', () => {
     expect(bachsSignatureOk(bachsHeaders({ 'bachs-signature': `t=${ts},v1=${sig}` }), body, secret, now)).toBe(true);
     expect(bachsSignatureOk(bachsHeaders({ 'bachs-signature': sig, 'bachs-timestamp': ts }), body, secret, now)).toBe(true);
     expect(bachsSignatureOk(bachsHeaders({ 'bachs-signature': 'v1=deadbeef', 'bachs-timestamp': ts }), body, secret, now)).toBe(false);
+  });
+});
+
+import { canBuy as canBuyDaily, plansOf as plansOfDaily, planForPaid as planForPaidDaily } from './billing-rules';
+
+describe('the day pass', () => {
+  const s = { dailyPrice: 200, monthlyPrice: 5000, quarterlyPrice: 10000, trialDays: 2, paywallEnabled: true, currency: 'NGN' };
+  const now = new Date('2026-10-09T12:00:00Z');
+
+  it('is a 1-day plan, and the month shows its saving over 30 day passes', () => {
+    const plans = plansOfDaily(s);
+    expect(plans.map((p) => [p.id, p.days, p.price, p.saving])).toEqual([
+      ['DAILY', 1, 200, 0],
+      ['MONTHLY', 30, 5000, 1000],
+      ['QUARTERLY', 90, 10000, 5000],
+    ]);
+  });
+
+  it('can be renewed any time, and upgraded to a month or 3 months', () => {
+    const ctx = { active: true, endsAt: new Date(now.getTime() + 20 * 3_600_000), currentPlan: 'DAILY' as const };
+    expect(canBuyDaily('DAILY', ctx, now).ok).toBe(true);
+    expect(canBuyDaily('MONTHLY', ctx, now).ok).toBe(true);
+    expect(canBuyDaily('QUARTERLY', ctx, now).ok).toBe(true);
+  });
+
+  it('is not sold on top of a month with weeks left', () => {
+    const ctx = { active: true, endsAt: new Date(now.getTime() + 20 * 86_400_000), currentPlan: 'MONTHLY' as const };
+    expect(canBuyDaily('DAILY', ctx, now).ok).toBe(false);
+  });
+
+  it('paid at the month price becomes a month', () => {
+    expect(planForPaidDaily({ plan: 'DAILY', amount: 200 }, 5000, s)).toMatchObject({ plan: 'MONTHLY', days: 30, corrected: true });
+    expect(planForPaidDaily({ plan: 'DAILY', amount: 200 }, 200, s)).toMatchObject({ plan: 'DAILY', days: 1, corrected: false });
   });
 });

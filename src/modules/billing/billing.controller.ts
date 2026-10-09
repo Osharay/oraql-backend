@@ -12,7 +12,7 @@ import { BillingService } from './billing.service';
 import { bachsSignatureOk, flutterwaveSignatureOk, type PlanId, type ProviderId } from './billing-rules';
 
 class CheckoutDto {
-  @IsIn(['MONTHLY', 'QUARTERLY'])
+  @IsIn(['DAILY', 'MONTHLY', 'QUARTERLY'])
   plan!: PlanId;
 
   @IsIn(['FLUTTERWAVE', 'BACHS'])
@@ -25,6 +25,7 @@ class ConfirmDto {
 }
 
 class SettingsDto {
+  @IsOptional() @IsInt() @Min(100) dailyPrice?: number;
   @IsOptional() @IsInt() @Min(100) monthlyPrice?: number;
   @IsOptional() @IsInt() @Min(100) quarterlyPrice?: number;
   @IsOptional() @IsInt() @Min(0) @Max(60) trialDays?: number;
