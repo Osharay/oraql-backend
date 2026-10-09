@@ -7,6 +7,7 @@ import {
   canBuy,
   extendedEnd,
   paymentMatches,
+  planForPaid,
   PLAN_DAYS,
   PLAN_LABEL,
   plansOf,
@@ -151,6 +152,7 @@ export class BillingService {
     const payment = await this.prisma.payment.create({
       data: { userId, provider, plan, amount, currency: s.currency, periodDays: PLAN_DAYS[plan], reference },
     });
+    this.logger.log(`Checkout ${reference}: ${plan} at ${amount} ${s.currency} via ${provider}`);
 
     try {
       if (provider === 'FLUTTERWAVE') {
@@ -197,32 +199,36 @@ export class BillingService {
   async confirm(reference: string, userId?: string) {
     const payment = await this.prisma.payment.findUnique({ where: { reference } });
     if (!payment || (userId && payment.userId !== userId)) throw new NotFoundException('Payment not found');
-    if (payment.status === 'PAID') return { paid: true, alreadyApplied: true, ...(await this.endsAt(payment.userId)) };
+    if (payment.status === 'PAID') return { paid: true, alreadyApplied: true, ...(await this.bought(payment.id, payment.userId)) };
 
     const expected = { amount: payment.amount, currency: payment.currency };
     let paid = false;
     let providerRef: string | null = payment.providerRef;
+    let paidAmount: number | null = null;
 
     if (payment.provider === 'FLUTTERWAVE') {
       const tx = await flutterwaveVerify(reference);
       if (tx && tx.tx_ref === reference && tx.status === 'successful' && paymentMatches(tx, expected)) {
         paid = true;
         providerRef = String(tx.id);
+        paidAmount = Number(tx.amount);
       }
     } else if (payment.provider === 'BACHS' && payment.providerRef) {
       const session = await bachsSession(payment.providerRef);
       if (session && bachsPaid(session) && (session.amount == null || paymentMatches({ amount: session.amount, currency: session.currency ?? payment.currency }, expected))) {
         paid = true;
+        paidAmount = session.amount == null ? null : Number(session.amount);
       }
     }
 
     if (!paid) return { paid: false };
-    await this.fulfil(payment.id, providerRef);
-    return { paid: true, alreadyApplied: false, ...(await this.endsAt(payment.userId)) };
+    await this.fulfil(payment.id, providerRef, paidAmount);
+    return { paid: true, alreadyApplied: false, ...(await this.bought(payment.id, payment.userId)) };
   }
 
   /** PENDING → PAID once, then add the plan's days. */
-  async fulfil(paymentId: string, providerRef: string | null) {
+  async fulfil(paymentId: string, providerRef: string | null, paidAmount: number | null = null) {
+    const settings = await this.settings();
     await this.prisma.$transaction(async (tx) => {
       const moved = await tx.payment.updateMany({
         where: { id: paymentId, status: { not: 'PAID' } },
@@ -230,14 +236,25 @@ export class BillingService {
       });
       if (moved.count === 0) return; // already applied by the other path
       const p = await tx.payment.findUniqueOrThrow({ where: { id: paymentId } });
+      const buys = planForPaid({ plan: p.plan as PlanId, amount: p.amount }, paidAmount, settings);
+      if (buys.corrected) {
+        await tx.payment.update({ where: { id: p.id }, data: { plan: buys.plan, periodDays: buys.days, amount: buys.amount } });
+        this.logger.warn(`Payment ${p.reference} was recorded as ${p.plan} but ${buys.amount} was paid: applied as ${buys.plan}`);
+      }
       const u = await tx.user.findUniqueOrThrow({ where: { id: p.userId }, select: { subscriptionEndsAt: true } });
       await tx.user.update({
         where: { id: p.userId },
-        data: { subscriptionEndsAt: extendedEnd(u.subscriptionEndsAt, new Date(), p.periodDays) },
+        data: { subscriptionEndsAt: extendedEnd(u.subscriptionEndsAt, new Date(), buys.days) },
       });
       this.accessCache.delete(p.userId);
-      this.logger.log(`Payment ${p.reference} paid: ${p.plan} via ${p.provider}`);
+      this.logger.log(`Payment ${p.reference} paid: ${buys.plan} (${buys.amount} ${p.currency}) via ${p.provider}`);
     });
+  }
+
+  /** What was bought and when access now ends, for the return page. */
+  private async bought(paymentId: string, userId: string) {
+    const p = await this.prisma.payment.findUnique({ where: { id: paymentId }, select: { plan: true, amount: true, currency: true } });
+    return { plan: p?.plan ?? null, amount: p?.amount ?? null, currency: p?.currency ?? null, ...(await this.endsAt(userId)) };
   }
 
   private async endsAt(userId: string) {
@@ -275,7 +292,7 @@ export class BillingService {
       this.logger.warn(`Bachs event for ${payment.reference} did not match the price; not applied`);
       return { ignored: true };
     }
-    await this.fulfil(payment.id, d.checkout_id ?? payment.providerRef);
+    await this.fulfil(payment.id, d.checkout_id ?? payment.providerRef, d.amount == null ? null : Number(d.amount));
     return { paid: true };
   }
 

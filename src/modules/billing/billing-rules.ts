@@ -84,6 +84,23 @@ export function canBuy(plan: PlanId, c: BuyContext, now: Date): { ok: boolean; r
   };
 }
 
+/**
+ * What a paid payment buys, going by the money the provider says arrived. If
+ * a payment recorded as one month was paid at the 3-month price or more, the
+ * user gets the 3 months they paid for rather than the record winning.
+ */
+export function planForPaid(
+  recorded: { plan: PlanId; amount: number },
+  paidAmount: number | null | undefined,
+  s: PriceSettings,
+): { plan: PlanId; days: number; amount: number; corrected: boolean } {
+  const paid = paidAmount == null ? NaN : Number(paidAmount);
+  if (recorded.plan === 'MONTHLY' && Number.isFinite(paid) && paid >= s.quarterlyPrice && s.quarterlyPrice > s.monthlyPrice) {
+    return { plan: 'QUARTERLY', days: PLAN_DAYS.QUARTERLY, amount: Math.round(paid), corrected: true };
+  }
+  return { plan: recorded.plan, days: PLAN_DAYS[recorded.plan], amount: recorded.amount, corrected: false };
+}
+
 export function priceOf(s: PriceSettings, plan: PlanId): number {
   return plan === 'MONTHLY' ? s.monthlyPrice : s.quarterlyPrice;
 }

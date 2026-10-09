@@ -144,4 +144,15 @@ describe('BillingService', () => {
     await expect(svc.checkout('u1', 'QUARTERLY', 'FLUTTERWAVE')).rejects.toThrow('already have an active subscription');
     expect((await svc.status('u1')).plans.every((p) => !p.buyable)).toBe(true);
   });
+
+  it('a payment recorded as one month but paid at the 3-month price gives 3 months', async () => {
+    const { prisma, users, payments } = fakePrisma();
+    const svc = new BillingService(prisma);
+    const { reference } = await svc.checkout('u1', 'MONTHLY', 'BACHS');
+    await svc.onBachsEvent({ type: 'checkout.completed', data: { reference, checkout_id: 'chk_1', payment_status: 'paid', amount: '10000.00', currency: 'NGN' } });
+    const ends = users.get('u1').subscriptionEndsAt.getTime();
+    expect(Math.abs(ends - (Date.now() + 90 * day))).toBeLessThan(5000);
+    const p = [...payments.values()][0];
+    expect([p.plan, p.periodDays, p.amount]).toEqual(['QUARTERLY', 90, 10000]);
+  });
 });
