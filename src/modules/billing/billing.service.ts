@@ -4,6 +4,7 @@ import { PrismaService } from '@/common/prisma/prisma.service';
 import { frontendUrl } from '@/config/app.config';
 import {
   accessOf,
+  canBuy,
   extendedEnd,
   paymentMatches,
   PLAN_DAYS,
@@ -97,9 +98,24 @@ export class BillingService {
     return allowed;
   }
 
+  /** What the user holds now, for deciding which plans they may buy. */
+  private async buyContext(u: { id: string; role: unknown; createdAt: Date; trialEndsAt: Date | null; subscriptionEndsAt: Date | null }, s: PriceSettings, now: Date) {
+    const access = accessOf({ ...u, role: String(u.role) }, s, now);
+    const last = await this.prisma.payment.findFirst({
+      where: { userId: u.id, status: 'PAID' },
+      orderBy: { paidAt: 'desc' },
+      select: { plan: true },
+    });
+    return {
+      access,
+      ctx: { active: access.state === 'ACTIVE', endsAt: u.subscriptionEndsAt, currentPlan: (last?.plan as PlanId | undefined) ?? null },
+    };
+  }
+
   async status(userId: string) {
     const [u, s] = await Promise.all([this.user(userId), this.settings()]);
-    const access = accessOf({ ...u, role: String(u.role) }, s, new Date());
+    const now = new Date();
+    const { access, ctx } = await this.buyContext(u, s, now);
     return {
       state: access.state,
       allowed: access.allowed,
@@ -107,7 +123,11 @@ export class BillingService {
       subscriptionEndsAt: u.subscriptionEndsAt,
       currency: s.currency,
       trialDays: s.trialDays,
-      plans: plansOf(s),
+      currentPlan: ctx.active ? ctx.currentPlan : null,
+      plans: plansOf(s).map((p) => {
+        const b = canBuy(p.id, ctx, now);
+        return { ...p, buyable: b.ok, note: b.reason ?? null, renewFrom: b.renewFrom ?? null };
+      }),
       providers: [
         { id: 'FLUTTERWAVE' as ProviderId, label: 'Flutterwave', methods: 'Card, bank transfer or USSD', available: flutterwaveConfigured() },
         { id: 'BACHS' as ProviderId, label: 'Bachs', methods: 'Card, transfer or stablecoins (USDT, USDC)', available: bachsConfigured() },
@@ -120,6 +140,9 @@ export class BillingService {
     if (!PLAN_DAYS[plan]) throw new BadRequestException('Unknown plan');
     const u = await this.user(userId);
     const s = await this.settings();
+    const { ctx } = await this.buyContext(u, s, new Date());
+    const allowedNow = canBuy(plan, ctx, new Date());
+    if (!allowedNow.ok) throw new BadRequestException(allowedNow.reason);
     const amount = priceOf(s, plan);
     const reference = `oraql_${randomUUID().replace(/-/g, '')}`;
     const name = [u.firstName, u.lastName].filter(Boolean).join(' ') || null;

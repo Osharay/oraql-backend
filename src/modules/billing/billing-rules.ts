@@ -52,6 +52,38 @@ export function extendedEnd(current: Date | null, now: Date, days: number): Date
   return new Date(from.getTime() + days * 86_400_000);
 }
 
+/** In the last few days of a paid period the user may renew early. */
+export const RENEW_WINDOW_DAYS = 3;
+
+export interface BuyContext {
+  /** True only while a paid period is running (not trial, admin or comp). */
+  active: boolean;
+  endsAt: Date | null;
+  /** The plan of the latest paid payment. */
+  currentPlan: PlanId | null;
+}
+
+/**
+ * Whether a plan can be bought now. Anyone without a running paid period can
+ * buy either plan. While one runs, the only purchases are an upgrade from the
+ * month to three months, or a renewal in the last few days — so nobody pays
+ * twice for time they already have. Bought days still go on top of what is left.
+ */
+export function canBuy(plan: PlanId, c: BuyContext, now: Date): { ok: boolean; reason?: string; renewFrom?: Date } {
+  if (!c.active || !c.endsAt || c.endsAt <= now) return { ok: true };
+  const renewFrom = new Date(c.endsAt.getTime() - RENEW_WINDOW_DAYS * 86_400_000);
+  if (now >= renewFrom) return { ok: true };
+  if (plan === 'QUARTERLY' && c.currentPlan === 'MONTHLY') return { ok: true };
+  return {
+    ok: false,
+    renewFrom,
+    reason:
+      plan === 'MONTHLY' && c.currentPlan === 'MONTHLY'
+        ? 'You are already on the monthly plan. You can renew in its last 3 days, or upgrade to 3 months now.'
+        : 'You already have an active subscription. You can renew in its last 3 days.',
+  };
+}
+
 export function priceOf(s: PriceSettings, plan: PlanId): number {
   return plan === 'MONTHLY' ? s.monthlyPrice : s.quarterlyPrice;
 }

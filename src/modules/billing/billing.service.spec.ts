@@ -37,7 +37,10 @@ function fakePrisma() {
       update: async ({ where, data }: any) => Object.assign(payments.get(where.id), data),
       findUnique: async ({ where }: any) => [...payments.values()].find((p) => p.reference === where.reference) ?? null,
       findUniqueOrThrow: async ({ where }: any) => payments.get(where.id),
-      findFirst: async ({ where }: any) => [...payments.values()].find((p) => p.providerRef === where.providerRef) ?? null,
+      findFirst: async ({ where }: any) =>
+        [...payments.values()]
+          .filter((p) => Object.entries(where).every(([k, v]) => p[k] === v))
+          .sort((a, b) => (b.paidAt?.getTime() ?? 0) - (a.paidAt?.getTime() ?? 0))[0] ?? null,
       updateMany: async ({ where, data }: any) => {
         const p = payments.get(where.id);
         if (!p || p.status === 'PAID') return { count: 0 };
@@ -109,14 +112,36 @@ describe('BillingService', () => {
     expect(Math.abs(ends - (Date.now() + 30 * day))).toBeLessThan(5000);
   });
 
-  it('adds a new month to the days still left', async () => {
+  it('adds a renewal in the last days to the days still left', async () => {
     const { prisma, users } = fakePrisma();
-    users.get('u1').subscriptionEndsAt = new Date(Date.now() + 10 * day);
+    users.get('u1').subscriptionEndsAt = new Date(Date.now() + 2 * day);
     const svc = new BillingService(prisma);
     const { reference } = await svc.checkout('u1', 'MONTHLY', 'FLUTTERWAVE');
     (flutterwaveVerify as jest.Mock).mockResolvedValue({ id: 2, tx_ref: reference, status: 'successful', amount: 5000, currency: 'NGN' });
     await svc.confirm(reference, 'u1');
     const ends = users.get('u1').subscriptionEndsAt.getTime();
-    expect(Math.abs(ends - (Date.now() + 40 * day))).toBeLessThan(5000);
+    expect(Math.abs(ends - (Date.now() + 32 * day))).toBeLessThan(5000);
+  });
+
+  it('while a month runs: no second month, but an upgrade to 3 months adds 90 days on top', async () => {
+    const { prisma, users } = fakePrisma();
+    const svc = new BillingService(prisma);
+    const first = await svc.checkout('u1', 'MONTHLY', 'FLUTTERWAVE');
+    (flutterwaveVerify as jest.Mock).mockResolvedValue({ id: 3, tx_ref: first.reference, status: 'successful', amount: 5000, currency: 'NGN' });
+    await svc.confirm(first.reference, 'u1');
+
+    await expect(svc.checkout('u1', 'MONTHLY', 'FLUTTERWAVE')).rejects.toThrow('already on the monthly plan');
+    const status = await svc.status('u1');
+    expect(status.plans.map((p) => [p.id, p.buyable])).toEqual([['MONTHLY', false], ['QUARTERLY', true]]);
+
+    const up = await svc.checkout('u1', 'QUARTERLY', 'FLUTTERWAVE');
+    (flutterwaveVerify as jest.Mock).mockResolvedValue({ id: 4, tx_ref: up.reference, status: 'successful', amount: 10000, currency: 'NGN' });
+    await svc.confirm(up.reference, 'u1');
+    const ends = users.get('u1').subscriptionEndsAt.getTime();
+    expect(Math.abs(ends - (Date.now() + 120 * day))).toBeLessThan(5000);
+
+    // On 3 months now: nothing more to buy until the last days.
+    await expect(svc.checkout('u1', 'QUARTERLY', 'FLUTTERWAVE')).rejects.toThrow('already have an active subscription');
+    expect((await svc.status('u1')).plans.every((p) => !p.buyable)).toBe(true);
   });
 });
