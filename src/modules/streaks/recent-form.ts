@@ -123,6 +123,15 @@ export function recentFormContext(results: Result[], hitRate: number, baselineRa
 }
 
 /**
+ * The honest chance from a bare record, for a snapshot whose run stored none:
+ * pulled towards the usual rate and capped, with no form adjustment.
+ */
+export function chanceFromRecord(hitRate: number, sampleSize: number, baselineRate: number): number {
+  const wins = Math.round(hitRate * sampleSize);
+  return capChance(shrunkRate(wins, sampleSize, baselineRate));
+}
+
+/**
  * The chance a slice shows, from its stored context: the honest chance where
  * the run recorded one, else what it showed then (form, else the raw record).
  * Past picks keep the figure they were published with.

@@ -218,6 +218,7 @@ export class ResultsService {
         components: {
           orderBy: { rank: 'asc' },
           select: {
+            chance: true,
             snapshot: {
               select: {
                 eventId: true,
@@ -264,7 +265,7 @@ export class ResultsService {
             result: s.result?.result ? String(s.result.result) : null,
             // The honest chance where the cluster was built with one; older
             // clusters were built on the raw record and keep showing it.
-            probability: (sc.context as { chance?: number } | null)?.chance ?? s.hitRate,
+            probability: k.chance ?? (sc.context as { chance?: number } | null)?.chance ?? s.hitRate,
             key: betKey({ eventId: s.eventId, ...sc }),
           };
         });

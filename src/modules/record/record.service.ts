@@ -242,6 +242,7 @@ export class RecordService {
         components: {
           orderBy: { rank: 'asc' },
           select: {
+            chance: true,
             snapshot: {
               select: {
                 eventId: true,
@@ -281,7 +282,7 @@ export class RecordService {
             match: this.head(s.event),
             label: streakMarketLabel(sc.marketDefinition.displayName, marketScope(sc.marketDefinition.marketId), name),
             result: s.result?.result ? String(s.result.result) : null,
-            probability: (sc.context as { chance?: number } | null)?.chance ?? s.hitRate,
+            probability: k.chance ?? (sc.context as { chance?: number } | null)?.chance ?? s.hitRate,
           };
         });
         const kicks = legs.map((l) => l.match.kickoffAt.getTime());

@@ -57,3 +57,41 @@ describe('OraQL clusters on one day', () => {
     expect(new Set(events).size).toBe(events.length); // no match twice
   });
 });
+
+describe('a snapshot from before the honest chances', () => {
+  it('is built in at its honest chance, never its raw 100%', async () => {
+    const kickoffAt = new Date(Date.now() + 6 * 3600e3);
+    const old = (id: string, eventId: string, market: string, hitRate: number, sampleSize: number, baselineRate: number) => ({
+      id, hitRate, sampleSize, baselineRate, lift: 0.1, strengthScore: 1, eventId, kickoffAt,
+      event: { leagueId: `l-${eventId}` },
+      streakCandidate: {
+        marketDefinitionId: `d-${market}`, survivedGate: true, selection: 'HOME', entityId: `t-${eventId}`,
+        context: {}, // no chance stored by that run
+        marketDefinition: { marketId: market },
+      },
+    });
+    const snapshots = [
+      old('a', 'fluminense', 'AH_PLUS_2_5', 1, 92, 0.93),
+      old('b', 'fortaleza', 'TEAM_UNDER_2_5', 0.987, 77, 0.88),
+      old('c', 'palmeiras', 'AH_PLUS_1_5', 0.967, 92, 0.83),
+    ];
+    let stored: Array<{ snapshotId: string; chance: number }> = [];
+    let combined = 0;
+    const prisma: any = {
+      streakSnapshot: { findMany: async () => snapshots },
+      cluster: {
+        findMany: async () => [],
+        deleteMany: async () => ({ count: 0 }),
+        create: async ({ data }: any) => {
+          combined = data.combinedProbability;
+          return { id: 'c1' };
+        },
+      },
+      clusterComponent: { createMany: async ({ data }: any) => (stored = data) },
+    };
+    await new ClustersService(prisma).buildForDate({});
+    expect(stored.length).toBe(3);
+    for (const leg of stored) expect(leg.chance).toBeLessThanOrEqual(0.9);
+    expect(combined).toBeLessThanOrEqual(0.9 ** 3 + 1e-9);
+  });
+});

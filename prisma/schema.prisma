@@ -856,6 +856,9 @@ model ClusterComponent {
   snapshotId String
   snapshot   StreakSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
   rank       Int
+  /// The chance this selection was built into the cluster with; null on
+  /// clusters built before 9 Oct 2026, which used the raw record.
+  chance     Float?
 
   @@unique([clusterId, snapshotId])
   @@map("cluster_components")

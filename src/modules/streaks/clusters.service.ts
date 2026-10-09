@@ -10,6 +10,7 @@ import {
   type Selectable,
 } from './cluster-selection';
 import { engineSettings } from './engine-settings';
+import { chanceFromRecord } from './recent-form';
 import { marketScope } from './market-definitions';
 import { tierOf, type ClusterType } from './cluster-tiers';
 import { betKey } from './bet-key';
@@ -33,6 +34,8 @@ interface SnapshotRow {
   id: string;
   eventId: string;
   hitRate: number;
+  sampleSize: number;
+  baselineRate: number;
   lift: number;
   strengthScore: number;
   event: { leagueId: string };
@@ -72,6 +75,7 @@ export class ClustersService {
   }) {
     const settings = engineSettings();
     const bar = settings.clusterBar;
+    const honestOn = settings.honestChance;
     const size = Math.min(options?.size ?? (bar ? settings.clusterSize : this.DEFAULT_SIZE), this.MAX_SIZE);
     const count = options?.count ?? 3;
     const requireDistinctLeague = options?.requireDistinctLeague ?? false;
@@ -92,6 +96,8 @@ export class ClustersService {
       select: {
         id: true,
         hitRate: true,
+        sampleSize: true,
+        baselineRate: true,
         lift: true,
         strengthScore: true,
         eventId: true,
@@ -145,7 +151,11 @@ export class ClustersService {
     // With the bar on, `hitRate` carries the honest chance and picks are ranked
     // on it first: a cluster is meant to land, so the likeliest strong picks
     // lead, not the most unusual ones.
-    const chanceOf = (s: SnapshotRow) => (s.streakCandidate.context as { chance?: number } | null)?.chance ?? s.hitRate;
+    // A snapshot past its cutoff keeps the run that captured it; if that run
+    // stored no honest chance, it is worked out from the record the same way.
+    const chanceOf = (s: SnapshotRow) =>
+      (s.streakCandidate.context as { chance?: number } | null)?.chance ??
+      (honestOn ? chanceFromRecord(s.hitRate, s.sampleSize, s.baselineRate) : s.hitRate);
     const flatten = (rows: SnapshotRow[]): Selectable[] =>
       rows.map((s) => ({
         id: s.id,
@@ -215,6 +225,7 @@ export class ClustersService {
           clusterId: cluster.id,
           snapshotId: c.id,
           rank: rank + 1,
+          chance: bar ? c.hitRate : null,
         })),
       });
 
