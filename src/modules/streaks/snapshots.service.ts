@@ -218,25 +218,57 @@ export class SnapshotsService {
       return { captured: 0, displayed: 0, skippedPastCutoff, note: 'Nothing to capture' };
     }
 
-    // Skip bets already captured for the match — by an earlier run (each run
-    // has its own candidate rows) or from the other team's side of a fixture
-    // market. The first capture is the one that stands on the record.
+    // One snapshot per bet on a match. A bet captured by an earlier run (each
+    // run has its own candidate rows) or from the other team's side of a
+    // fixture market is not captured again. Before its cutoff it is brought
+    // up to date with the latest run instead — otherwise it keeps the evidence
+    // and the chance of the run that first found it (a raw 97% from before the
+    // honest chances, say) right up to kickoff. After the cutoff it is never
+    // touched: that is the record.
     const existing = await this.prisma.streakSnapshot.findMany({
       where: { eventId: { in: [...new Set(rows.map((r) => r.eventId))] } },
       select: {
+        id: true,
         eventId: true,
+        dataCutoffAt: true,
+        streakCandidateId: true,
         streakCandidate: { select: { marketDefinitionId: true, selection: true, entityId: true } },
       },
     });
-    const seen = new Set(existing.map((e) => betKey({ eventId: e.eventId, ...e.streakCandidate })));
-    const fresh = rows.filter((_, i) => {
-      if (seen.has(rowKeys[i])) return false;
-      seen.add(rowKeys[i]);
-      return true;
-    });
+    const byKey = new Map(existing.map((e) => [betKey({ eventId: e.eventId, ...e.streakCandidate }), e]));
+    const seen = new Set<string>();
+    const fresh: Prisma.StreakSnapshotCreateManyInput[] = [];
+    let refreshed = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const key = rowKeys[i];
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const old = byKey.get(key);
+      if (!old) {
+        fresh.push(rows[i]);
+        continue;
+      }
+      if (old.dataCutoffAt > now && old.streakCandidateId !== rows[i].streakCandidateId) {
+        const r = rows[i];
+        await this.prisma.streakSnapshot.update({
+          where: { id: old.id },
+          data: {
+            streakCandidateId: r.streakCandidateId,
+            capturedAt: now,
+            hitRate: r.hitRate,
+            baselineRate: r.baselineRate,
+            lift: r.lift,
+            sampleSize: r.sampleSize,
+            currentStreak: r.currentStreak,
+            strengthScore: r.strengthScore,
+          },
+        });
+        refreshed++;
+      }
+    }
 
     if (fresh.length === 0) {
-      return { captured: 0, displayed: 0, skippedPastCutoff, note: 'Already captured' };
+      return { captured: 0, refreshed, displayed: 0, skippedPastCutoff, note: refreshed ? 'Brought up to date' : 'Already captured' };
     }
 
     await this.prisma.streakSnapshot.createMany({ data: fresh });
@@ -278,6 +310,7 @@ export class SnapshotsService {
       suggestiveCandidates: suggestive.length,
       skippedPastCutoff,
       skippedUnsettleable,
+      refreshed,
       note: 'ok',
     };
   }
