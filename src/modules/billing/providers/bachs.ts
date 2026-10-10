@@ -63,6 +63,7 @@ export interface BachsSession {
   amount?: string;
   currency?: string;
   reference?: string;
+  charge?: { status?: string } | null;
 }
 
 export async function bachsSession(checkoutId: string): Promise<BachsSession | null> {
@@ -73,6 +74,11 @@ export async function bachsSession(checkoutId: string): Promise<BachsSession | n
   }
 }
 
-/** Paid, as a session or a checkout.completed event reports it. */
-export const bachsPaid = (s: { status?: string; payment_status?: string }) =>
-  s.payment_status === 'paid' || (s.status === 'completed' && s.payment_status == null);
+/**
+ * Paid, as a session or a checkout.completed event reports it. A session's
+ * `status: completed` only means the checkout ended — Bachs sends
+ * checkout.completed "whether or not a payment was collected" — so it never
+ * counts on its own. Paid means `payment_status: paid` or a succeeded charge.
+ */
+export const bachsPaid = (s: { status?: string; payment_status?: string; charge?: { status?: string } | null }) =>
+  s.payment_status === 'paid' || String(s.charge?.status ?? '').toLowerCase() === 'succeeded';

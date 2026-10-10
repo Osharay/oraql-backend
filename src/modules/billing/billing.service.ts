@@ -278,7 +278,7 @@ export class BillingService {
   /** Bachs's checkout.completed (signature already checked by the controller). */
   async onBachsEvent(body: {
     type?: string;
-    data?: { reference?: string; checkout_id?: string; status?: string; payment_status?: string; amount?: string; currency?: string };
+    data?: { reference?: string; checkout_id?: string; status?: string; payment_status?: string; amount?: string; currency?: string; charge?: { status?: string } | null };
   }) {
     if (body?.type !== 'checkout.completed' && body?.type !== 'collection.succeeded') return { ignored: true };
     const d = body.data ?? {};
@@ -289,6 +289,8 @@ export class BillingService {
         : null;
     if (!payment) return { ignored: true };
     if (body.type === 'checkout.completed' && !bachsPaid(d)) return { ignored: true };
+    // collection.succeeded carries the charge itself: only SUCCEEDED counts.
+    if (body.type === 'collection.succeeded' && d.status && d.status.toUpperCase() !== 'SUCCEEDED') return { ignored: true };
     if (d.amount != null && !paymentMatches({ amount: d.amount, currency: d.currency ?? payment.currency }, payment)) {
       this.logger.warn(`Bachs event for ${payment.reference} did not match the price; not applied`);
       return { ignored: true };
