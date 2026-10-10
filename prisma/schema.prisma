@@ -53,11 +53,17 @@ model User {
   trialEndsAt        DateTime?
   subscriptionEndsAt DateTime?
 
+  // Email: unsubscribed from newsletters (account emails still go), and the
+  // trial/subscription end date already reminded about, so it is sent once.
+  emailOptOut     Boolean   @default(false)
+  reminderSentFor DateTime?
+
   // Relations
   payments          Payment[]
   builderSelections BuilderSelection[]
   activityLogs      UserActivityLog[]
   customClusters    CustomCluster[]
+  authTokens        AuthToken[]
 
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
@@ -991,4 +997,45 @@ model Feedback {
 
   @@index([createdAt])
   @@map("feedback")
+}
+
+/// One-time links sent by email: confirm an address, or reset a password.
+/// Only a hash of the token is stored.
+model AuthToken {
+  id        String    @id @default(uuid())
+  userId    String
+  /// VERIFY_EMAIL or RESET_PASSWORD.
+  type      String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@map("auth_tokens")
+}
+
+/// An email sent from Engine controls: a newsletter to everyone, or a
+/// message to one user.
+model EmailCampaign {
+  id         String    @id @default(uuid())
+  subject    String
+  body       String
+  buttonText String?
+  buttonUrl  String?
+  /// ALL or ONE.
+  audience   String
+  toEmail    String?
+  recipients Int       @default(0)
+  sent       Int       @default(0)
+  failed     Int       @default(0)
+  /// SENDING, SENT or FAILED.
+  status     String    @default("SENDING")
+  createdBy  String?
+  createdAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([createdAt])
+  @@map("email_campaigns")
 }

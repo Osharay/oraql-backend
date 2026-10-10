@@ -30,6 +30,7 @@ import { RecordModule } from '@/modules/record/record.module';
 import { CustomClustersModule } from '@/modules/custom-clusters/custom-clusters.module';
 import { BillingModule } from '@/modules/billing/billing.module';
 import { FeedbackModule } from '@/modules/feedback/feedback.module';
+import { MailModule } from '@/modules/mail/mail.module';
 
 @Module({
   imports: [
@@ -95,6 +96,7 @@ import { FeedbackModule } from '@/modules/feedback/feedback.module';
     CustomClustersModule,
     BillingModule,
     FeedbackModule,
+    MailModule,
   ],
 })
 export class AppModule {}

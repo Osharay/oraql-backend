@@ -75,6 +75,7 @@ export class UsersService {
         role: true,
         preferredSports: true,
         timezone: true,
+        emailVerified: true,
         createdAt: true,
       },
     });

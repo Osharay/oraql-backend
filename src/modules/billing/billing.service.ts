@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { MailService } from '@/modules/mail/mail.service';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '@/common/prisma/prisma.service';
 import { frontendUrl } from '@/config/app.config';
@@ -37,7 +38,10 @@ export class BillingService {
   private settingsCache: { at: number; value: PriceSettings } | null = null;
   private accessCache = new Map<string, { at: number; allowed: boolean }>();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly mail?: MailService,
+  ) {}
 
   async settings(): Promise<PriceSettings> {
     if (this.settingsCache && Date.now() - this.settingsCache.at < 30_000) return this.settingsCache.value;
@@ -230,6 +234,7 @@ export class BillingService {
   /** PENDING → PAID once, then add the plan's days. */
   async fulfil(paymentId: string, providerRef: string | null, paidAmount: number | null = null) {
     const settings = await this.settings();
+    let applied = false;
     await this.prisma.$transaction(async (tx) => {
       const moved = await tx.payment.updateMany({
         where: { id: paymentId, status: { not: 'PAID' } },
@@ -249,7 +254,10 @@ export class BillingService {
       });
       this.accessCache.delete(p.userId);
       this.logger.log(`Payment ${p.reference} paid: ${buys.plan} (${buys.amount} ${p.currency}) via ${p.provider}`);
+      applied = true;
     });
+    // The receipt goes once, by whichever path applied the payment.
+    if (applied) void this.mail?.receipt(paymentId).catch((e) => this.logger.error(`Receipt email failed: ${e}`));
   }
 
   /** What was bought and when access now ends, for the return page. */

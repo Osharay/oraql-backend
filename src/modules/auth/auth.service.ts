@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Optional,
   UnauthorizedException,
   ConflictException,
   Logger,
@@ -12,6 +13,7 @@ import { tokenMatches } from './token-hash';
 import { UsersService } from '@/modules/users/users.service';
 import { RegisterDto } from './dto/register.dto';
 import { AuthProvider } from '@prisma/client';
+import { MailService } from '@/modules/mail/mail.service';
 
 export interface JwtPayload {
   sub: string;
@@ -35,6 +37,7 @@ export class AuthService {
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
     private readonly config: ConfigService,
+    @Optional() private readonly mail?: MailService,
   ) {}
 
   /**
@@ -61,6 +64,8 @@ export class AuthService {
     await this.usersService.updateRefreshToken(user.id, tokens.refreshToken);
 
     this.logger.log(`User registered: ${user.email}`);
+    // Welcome and confirm-your-email; a failed send never blocks sign-up.
+    void this.mail?.welcome(user.id).catch((e) => this.logger.error(`Welcome email failed: ${e}`));
     return tokens;
   }
 
