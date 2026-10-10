@@ -24,7 +24,13 @@ describe('RecordService.publicRecord', () => {
       ],
     } as any);
 
+    (svc as any).streakItems = jest.fn().mockResolvedValue([
+      { probability: 0.7, result: 'WIN' },
+      { probability: 0.4, result: 'LOSS' },
+    ]);
+
     const res: any = await svc.publicRecord();
+    expect([res.calibration.days, res.calibration.strong.settled, res.calibration.strong.won]).toEqual([30, 1, 1]);
     const day = res.days[0];
     expect(day.matches[0].picks).toEqual([{ label: 'Over 1.5', chance: 0.8, result: 'WIN' }]);
     expect(day.matches[0].match.eventId).toBeUndefined();

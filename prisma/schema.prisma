@@ -976,3 +976,19 @@ model Payment {
   @@index([status, createdAt])
   @@map("payments")
 }
+
+/// What people tell us about OraQL, from the feedback button.
+model Feedback {
+  id        String   @id @default(uuid())
+  /// POSITIVE or NEGATIVE.
+  sentiment String
+  message   String?
+  email     String?
+  userId    String?
+  page      String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("feedback")
+}

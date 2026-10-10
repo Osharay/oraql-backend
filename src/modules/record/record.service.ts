@@ -10,6 +10,7 @@ import { dropContradictions } from '@/modules/streaks/contradictions';
 import { engineSettings } from '@/modules/streaks/engine-settings';
 import { clusterOutcome, driverOf, hitRate, type SettledItem } from '@/modules/results/results-summary';
 import { firstOfEach } from './first-of-each';
+import { calibrate } from './calibration';
 
 export type ResultsScope = 'all' | 'club' | 'international';
 interface ResultsWindow {
@@ -50,12 +51,17 @@ export class RecordService {
     if (this.publicCache && Date.now() - this.publicCache.at < 10 * 60_000) return this.publicCache.value;
     const DAYS = 7;
     const summary = await this.daily(DAYS, 'all');
+    // A longer window for the calibration table, so each band has enough picks.
+    const CAL_DAYS = 30;
+    const calSince = londonDayStart(londonDay(new Date(Date.now() - (CAL_DAYS - 1) * 86_400_000)))!;
+    const calItems = await this.streakItems({ since: calSince, until: new Date() }, 'all', 20_000);
     const details = await Promise.all(summary.days.map((d) => this.day(d.date, 'all')));
     const strip = (m: MatchHead) => ({ kickoffAt: m.kickoffAt, home: m.home, away: m.away, score: m.score, league: m.league });
     const value = {
       from: summary.from,
       to: summary.to,
       totals: { streaks: summary.totals.streaks, clusters: summary.totals.clusters },
+      calibration: { days: CAL_DAYS, from: londonDay(calSince), ...calibrate(calItems) },
       days: summary.days.map((d, i) => {
         const det = details[i];
         return {
