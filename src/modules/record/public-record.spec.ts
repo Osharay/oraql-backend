@@ -4,7 +4,7 @@ const match = { eventId: 'e1', kickoffAt: new Date('2026-10-08T15:00:00Z'), home
 const rate = { settled: 2, won: 1, rate: 0.5, expected: 0.6 };
 
 describe('RecordService.publicRecord', () => {
-  it('shows settled picks and clusters only, without how the chance was worked out, and caches', async () => {
+  it('shows settled clusters only — no streaks, nothing about how a chance was worked out — and caches', async () => {
     const svc = new RecordService({} as any);
     const daily = jest.spyOn(svc, 'daily').mockResolvedValue({
       days: [{ date: '2026-10-08', streaks: rate, evidence: rate, clusters: rate }],
@@ -24,17 +24,12 @@ describe('RecordService.publicRecord', () => {
       ],
     } as any);
 
-    (svc as any).streakItems = jest.fn().mockResolvedValue([
-      { probability: 0.7, result: 'WIN' },
-      { probability: 0.4, result: 'LOSS' },
-    ]);
-
     const res: any = await svc.publicRecord();
-    expect([res.calibration.days, res.calibration.strong.settled, res.calibration.strong.won]).toEqual([30, 1, 1]);
     const day = res.days[0];
-    expect(day.matches[0].picks).toEqual([{ label: 'Over 1.5', chance: 0.8, result: 'WIN' }]);
-    expect(day.matches[0].match.eventId).toBeUndefined();
-    expect(day.clusterList).toHaveLength(1);
+    expect(day.clusterList).toHaveLength(1); // the pending cluster is left out
+    expect(day.clusterList[0].legs[0].match.eventId).toBeUndefined();
+    expect(day.matches).toBeUndefined(); // no streaks in public
+    expect(res.totals.streaks).toBeUndefined();
     expect(JSON.stringify(res)).not.toContain('driver');
 
     await svc.publicRecord();

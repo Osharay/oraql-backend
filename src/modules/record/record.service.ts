@@ -10,7 +10,6 @@ import { dropContradictions } from '@/modules/streaks/contradictions';
 import { engineSettings } from '@/modules/streaks/engine-settings';
 import { clusterOutcome, driverOf, hitRate, type SettledItem } from '@/modules/results/results-summary';
 import { firstOfEach } from './first-of-each';
-import { calibrate } from './calibration';
 
 export type ResultsScope = 'all' | 'club' | 'international';
 interface ResultsWindow {
@@ -41,48 +40,35 @@ export class RecordService {
   private publicCache: { at: number; value: unknown } | null = null;
 
   /**
-   * The public track record on the landing page: the last 7 UK days, settled
-   * calls only (win and loss), each with its match, pick, OraQL chance and
-   * result. Nothing still to be played is included, so today's and upcoming
-   * picks stay for subscribers, and nothing about how a chance was worked out.
+   * The public track record on the landing page: OraQL's clusters from the
+   * last 7 UK days, settled ones only (win and loss), each selection with its
+   * match, pick, OraQL chance and result. Streaks are not shown publicly.
+   * Nothing still to be played is included, so today's and upcoming picks stay
+   * for subscribers, and nothing about how a chance was worked out.
    * Cached for 10 minutes because anyone can open it.
    */
   async publicRecord() {
     if (this.publicCache && Date.now() - this.publicCache.at < 10 * 60_000) return this.publicCache.value;
     const DAYS = 7;
     const summary = await this.daily(DAYS, 'all');
-    // A longer window for the calibration table, so each band has enough picks.
-    const CAL_DAYS = 30;
-    const calSince = londonDayStart(londonDay(new Date(Date.now() - (CAL_DAYS - 1) * 86_400_000)))!;
-    const calItems = await this.streakItems({ since: calSince, until: new Date() }, 'all', 20_000);
-    const details = await Promise.all(summary.days.map((d) => this.day(d.date, 'all')));
+    const withClusters = summary.days.filter((d) => d.clusters.settled > 0);
+    const details = await Promise.all(withClusters.map((d) => this.day(d.date, 'all')));
     const strip = (m: MatchHead) => ({ kickoffAt: m.kickoffAt, home: m.home, away: m.away, score: m.score, league: m.league });
     const value = {
       from: summary.from,
       to: summary.to,
-      totals: { streaks: summary.totals.streaks, clusters: summary.totals.clusters },
-      calibration: { days: CAL_DAYS, from: londonDay(calSince), ...calibrate(calItems) },
-      days: summary.days.map((d, i) => {
-        const det = details[i];
-        return {
-          date: d.date,
-          streaks: d.streaks,
-          clusters: d.clusters,
-          matches: (det?.matches ?? []).map((g) => ({
-            match: strip(g.match),
-            picks: g.items
-              .filter((p) => p.result === 'WIN' || p.result === 'LOSS')
-              .map((p) => ({ label: p.label, chance: p.probability, result: p.result })),
-          })).filter((g) => g.picks.length > 0),
-          clusterList: (det?.clusters ?? [])
-            .filter((c) => c.outcome === 'WIN' || c.outcome === 'LOSS')
-            .map((c) => ({
-              outcome: c.outcome,
-              chance: c.combinedProbability,
-              legs: c.legs.map((l) => ({ match: strip(l.match), label: l.label, chance: l.probability, result: l.result })),
-            })),
-        };
-      }),
+      totals: { clusters: summary.totals.clusters },
+      days: withClusters.map((d, i) => ({
+        date: d.date,
+        clusters: d.clusters,
+        clusterList: (details[i]?.clusters ?? [])
+          .filter((c) => c.outcome === 'WIN' || c.outcome === 'LOSS')
+          .map((c) => ({
+            outcome: c.outcome,
+            chance: c.combinedProbability,
+            legs: c.legs.map((l) => ({ match: strip(l.match), label: l.label, chance: l.probability, result: l.result })),
+          })),
+      })),
     };
     this.publicCache = { at: Date.now(), value };
     return value;
